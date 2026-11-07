@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.knightgambit.KnightGambit</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <name>KnightGambit</name>
+  <summary>Think. Play. Master.</summary>
+  <developer id="io.github.knightgambit">
+    <name>Junaid Ul Hassan</name>
+  </developer>
+  <description>
+    <p>KnightGambit is a premium, fully offline chess application for the GNOME desktop.</p>
+    <ul>
+      <li>Original Staunton-inspired vector pieces on a forest green and ivory board, sharp at every size</li>
+      <li>Complete official rules: castling, en passant, promotion, repetition, fifty and seventy-five move rules</li>
+      <li>Play Stockfish, Berserk, Ethereal, Koivisto or Leela Chess Zero at calibrated difficulty levels</li>
+      <li>Bullet, blitz, rapid, classical and custom clocks with increment and delay</li>
+      <li>Move history, game review, live engine analysis, PGN and FEN import and export</li>
+    </ul>
+  </description>
+  <launchable type="desktop-id">io.github.knightgambit.KnightGambit.desktop</launchable>
+  <provides>
+    <binary>knightgambit</binary>
+  </provides>
+  <categories>
+    <category>Game</category>
+    <category>BoardGame</category>
+  </categories>
+  <keywords>
+    <keyword>chess</keyword>
+    <keyword>stockfish</keyword>
+    <keyword>uci</keyword>
+  </keywords>
+  <url type="homepage">https://github.com/knightgambit/KnightGambit</url>
+  <url type="bugtracker">https://github.com/knightgambit/KnightGambit/issues</url>
+  <content_rating type="oars-1.1"/>
+  <supports>
+    <control>pointing</control>
+    <control>keyboard</control>
+  </supports>
+  <requires>
+    <display_length compare="ge">360</display_length>
+  </requires>
+  <branding>
+    <color type="primary" scheme_preference="light">#a7d5b9</color>
+    <color type="primary" scheme_preference="dark">#1f4a33</color>
+  </branding>
+  <releases>
+    <release version="1.0.1" date="2026-11-07">
+      <description>
+        <p>Game Review with Brilliant, Great, Best, Excellent, Good, Forced, Inaccuracy, Mistake, Miss and Blunder classifications, accuracy scores, an evaluation graph and best-move arrows.</p>
+        <p>Premoves, redesigned pieces and support for custom SVG piece folders.</p>
+      </description>
+    </release>
+    <release version="1.0.0" date="2026-11-07">
+      <description>
+        <p>First release of KnightGambit.</p>
+      </description>
+    </release>
+  </releases>
+</component>

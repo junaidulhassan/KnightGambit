@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0.35" y2="1">
+      <stop offset="0" stop-color="#3a7a56"/>
+      <stop offset="0.55" stop-color="#2b6245"/>
+      <stop offset="1" stop-color="#1d4632"/>
+    </linearGradient>
+    <linearGradient id="ivory" x1="0" y1="0" x2="1" y2="0.3">
+      <stop offset="0" stop-color="#fdf8ee"/>
+      <stop offset="0.58" stop-color="#f1e7d4"/>
+      <stop offset="0.66" stop-color="#dccbae"/>
+      <stop offset="1" stop-color="#d1bf9e"/>
+    </linearGradient>
+    <linearGradient id="rim" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.22"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+    <clipPath id="tileclip">
+      <rect x="8" y="8" width="112" height="108" rx="26"/>
+    </clipPath>
+  </defs>
+  <rect x="8" y="12" width="112" height="108" rx="26" fill="#12301f"/>
+  <rect x="8" y="8" width="112" height="108" rx="26" fill="url(#tile)"/>
+  <g clip-path="url(#tileclip)" fill="#ffffff">
+    <rect x="8" y="8" width="28" height="27" opacity="0.045"/>
+    <rect x="64" y="8" width="28" height="27" opacity="0.045"/>
+    <rect x="36" y="35" width="28" height="27" opacity="0.045"/>
+    <rect x="92" y="35" width="28" height="27" opacity="0.045"/>
+    <rect x="8" y="62" width="28" height="27" opacity="0.045"/>
+    <rect x="64" y="62" width="28" height="27" opacity="0.045"/>
+    <rect x="36" y="89" width="28" height="27" opacity="0.045"/>
+    <rect x="92" y="89" width="28" height="27" opacity="0.045"/>
+  </g>
+  <path d="M64 19 L106 62 L64 105 L22 62 Z" fill="none" stroke="#f3e9d6" stroke-opacity="0.16" stroke-width="1.6" stroke-linejoin="round"/>
+  <path d="M64 29 L96 62 L64 95 L32 62 Z" fill="none" stroke="#f3e9d6" stroke-opacity="0.10" stroke-width="1.2" stroke-linejoin="round"/>
+  <rect x="8.8" y="8.8" width="110.4" height="106.4" rx="25.2" fill="none" stroke="url(#rim)" stroke-width="1.6"/>
+  <g transform="translate(18.5 14) scale(0.94)">
+    <path d="M 32 76 C 30.5 67 34 60.5 41 55.5 C 35 58 28.5 60.5 23 60.5 C 17.5 60.5 14.5 56.5 15.5 52 C 16.5 47.5 21.5 44 26.5 40.5 C 31.5 37 35.5 30.5 38.5 24.5 C 40 20.5 42 17.5 44 15.5 L 46 7 L 51.5 14 C 63.5 16 73.5 27 75.5 42 C 77.5 54 74.5 66 71 76 Z" fill="url(#ivory)" stroke="#132a1e" stroke-width="3.2" stroke-linejoin="round"/>
+    <path d="M 22 88 L 78 88 Q 80 88 80 86 L 80 82 C 80 77.5 77 75 72 74.5 L 28 74.5 C 23 75 20 77.5 20 82 L 20 86 Q 20 88 22 88 Z" fill="url(#ivory)" stroke="#132a1e" stroke-width="3.2" stroke-linejoin="round"/>
+    <ellipse cx="39.5" cy="29" rx="2.7" ry="2.1" fill="#132a1e"/>
+    <circle cx="20.5" cy="51.5" r="1.7" fill="#132a1e"/>
+    <path d="M 54 19 C 64 23.5 70.5 33 71.5 46" stroke="#132a1e" stroke-width="2.2" stroke-linecap="round" fill="none" opacity="0.8"/>
+    <path d="M 33 34.5 C 30 39 26 42 22.5 45" stroke="#ffffff" stroke-width="2.2" stroke-linecap="round" fill="none" opacity="0.7"/>
+  </g>
+</svg>

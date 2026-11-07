@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=KnightGambit
+GenericName=Chess
+Comment=Think. Play. Master. Premium offline chess with open-source engines
+Exec=knightgambit %F
+Icon=io.github.knightgambit.KnightGambit
+Terminal=false
+Categories=Game;BoardGame;GTK;GNOME;
+Keywords=chess;board;game;stockfish;leela;engine;uci;pgn;fen;
+MimeType=application/x-chess-pgn;
+StartupNotify=true
+StartupWMClass=io.github.knightgambit.KnightGambit
+SingleMainWindow=true

@@ -1,0 +1,259 @@
+@define-color kg_forest #2f6b4a;
+@define-color kg_forest_deep #1f4a33;
+@define-color kg_ivory #f3ecdf;
+@define-color kg_wood #8a5a34;
+@define-color kg_charcoal #2b2a28;
+@define-color accent_bg_color #2f6b4a;
+@define-color accent_fg_color #ffffff;
+@define-color accent_color #2f7a52;
+
+:root {
+  --accent-bg-color: #2f6b4a;
+  --accent-fg-color: #ffffff;
+  --accent-color: #2f7a52;
+}
+
+.board-area {
+  background-image: radial-gradient(circle at 50% 35%, alpha(@kg_forest, 0.07), transparent 70%);
+}
+
+.player-bar {
+  padding: 4px 2px;
+  min-height: 46px;
+}
+
+.player-name {
+  font-weight: 700;
+  font-size: 1.05em;
+}
+
+.player-detail {
+  font-size: 0.9em;
+}
+
+.player-bar.to-move .player-name {
+  color: @accent_color;
+}
+
+.engine-avatar {
+  border-radius: 10px;
+}
+
+.captured-pieces {
+  min-height: 20px;
+}
+
+.material-advantage {
+  font-size: 0.85em;
+  font-weight: 700;
+  opacity: 0.7;
+  margin-left: 4px;
+}
+
+.clock {
+  font-family: "Ubuntu Mono", "Source Code Pro", monospace;
+  font-feature-settings: "tnum";
+  font-size: 1.55em;
+  font-weight: 700;
+  padding: 5px 14px;
+  border-radius: 10px;
+  background-color: alpha(currentColor, 0.07);
+  color: alpha(currentColor, 0.75);
+  transition: background-color 180ms ease, color 180ms ease;
+}
+
+.clock.active {
+  background-color: @kg_ivory;
+  color: @kg_charcoal;
+  box-shadow: 0 1px 3px alpha(black, 0.25), inset 0 0 0 1px alpha(black, 0.08);
+}
+
+.clock.low {
+  color: #c01c28;
+}
+
+.clock.low.active {
+  background-color: #c01c28;
+  color: white;
+}
+
+.game-sidebar .card {
+  padding: 12px;
+  border-radius: 14px;
+}
+
+.status-card .status-icon {
+  -gtk-icon-size: 22px;
+  color: @accent_color;
+}
+
+.moves-card {
+  padding: 0;
+}
+
+.moves-card .card-header {
+  padding: 10px 14px 4px 14px;
+}
+
+.move-list {
+  min-height: 150px;
+}
+
+.move-number {
+  font-feature-settings: "tnum";
+  font-size: 0.92em;
+  padding-right: 2px;
+}
+
+.move-button {
+  padding: 2px 8px;
+  min-height: 26px;
+  font-weight: 600;
+  border-radius: 6px;
+}
+
+.move-button.current-move {
+  background-color: alpha(@accent_bg_color, 0.22);
+  color: @accent_color;
+}
+
+.analysis-card .evaluation {
+  font-family: "Ubuntu Mono", monospace;
+  font-weight: 800;
+  font-size: 1.25em;
+}
+
+.analysis-line {
+  font-family: "Ubuntu Mono", monospace;
+  font-size: 0.95em;
+}
+
+levelbar.eval-bar trough {
+  min-height: 8px;
+  border-radius: 4px;
+  background-color: #2b2a28;
+}
+
+levelbar.eval-bar block.filled {
+  background-color: #f3ecdf;
+  border-radius: 4px;
+}
+
+.action-button {
+  padding-left: 6px;
+  padding-right: 6px;
+}
+
+.game-over-card {
+  padding: 26px 30px 22px 30px;
+  border-radius: 22px;
+  background-color: @window_bg_color;
+  box-shadow: 0 18px 48px alpha(black, 0.42), 0 0 0 1px alpha(black, 0.08);
+}
+
+.game-over-card .game-over-icon {
+  color: @accent_color;
+}
+
+.game-over-card.loss .game-over-icon {
+  color: #c01c28;
+}
+
+.game-over-card.draw .game-over-icon {
+  color: @kg_wood;
+}
+
+.game-over-card .game-over-score {
+  font-size: 1.6em;
+  font-weight: 800;
+  font-family: "Ubuntu Mono", monospace;
+  opacity: 0.8;
+}
+
+.game-over-card .game-over-subtitle {
+  font-size: 1.05em;
+}
+
+.choice-card {
+  border-radius: 14px;
+  padding: 6px 4px;
+}
+
+.choice-card:checked {
+  background-color: alpha(@accent_bg_color, 0.18);
+  box-shadow: inset 0 0 0 2px @accent_bg_color;
+  color: inherit;
+}
+
+.time-preset {
+  font-weight: 700;
+  font-feature-settings: "tnum";
+  border-radius: 10px;
+}
+
+.time-preset:checked {
+  background-color: @accent_bg_color;
+  color: @accent_fg_color;
+}
+
+.board-swatch {
+  border-radius: 8px;
+  box-shadow: 0 1px 3px alpha(black, 0.3);
+}
+
+.piece-preview {
+  padding: 12px;
+  border-radius: 12px;
+  background-color: #36694d;
+}
+
+.engine-row avatar {
+  margin: 6px 0;
+}
+
+label.success {
+  color: @success_color;
+}
+
+label.warning {
+  color: @warning_color;
+}
+
+label.error {
+  color: @error_color;
+}
+
+.review-card .accuracy-block {
+  padding: 8px 10px;
+  border-radius: 12px;
+}
+
+.review-card .accuracy-block.white-side {
+  background-color: #f3ecdf;
+  color: #2b2a28;
+}
+
+.review-card .accuracy-block.black-side {
+  background-color: #34312e;
+  color: #f3ecdf;
+}
+
+.review-card .accuracy-value {
+  font-size: 1.6em;
+  font-weight: 800;
+  font-feature-settings: "tnum";
+}
+
+.review-card .review-graph {
+  border-radius: 8px;
+}
+
+.review-card .review-counts .count {
+  font-weight: 700;
+  font-feature-settings: "tnum";
+}
+
+.review-card .review-feedback {
+  padding-top: 6px;
+  border-top: 1px solid alpha(currentColor, 0.12);
+}
