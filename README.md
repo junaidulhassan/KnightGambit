@@ -180,30 +180,6 @@ Two developer examples support manual verification:
   and renders it to PNG (`moves:`, `click:<square>`, `fen:`, `action:<win.action>`, `size:WxH`,
   `wait:<ms>`, `shot:<path>`, `quit`).
 
-## Project structure
-
-```
-src/
-  app/            application startup, paths
-  chess/          game state, draw rules, notation, material, PGN, premove geometry (UI independent)
-  review/         move classification, accuracy and review icons (UI independent)
-  clock/          chess clock and time controls (UI independent)
-  engine/         UCI parser, process, session state machine, probe, catalog, installer, registry, strength
-  settings/       persisted settings, board presets, change notifications
-  assets/         vector piece generator, board texture
-  ui/
-    board/        board widget (rendering, input, animation, geometry), board frame layout
-    dialogs/      new game, preferences, engines, shortcuts/about/FEN/PGN
-    controller.rs game flow, clocks, engine scheduling, review
-    widgets.rs    player bars, move list, analysis panel, result card
-    window.rs     main window, actions, shortcuts, fullscreen
-    sound.rs      synthesized sound effects
-data/             desktop entry, AppStream metainfo, icons
-assets/engines/   engine logos reproduced from their GPL repositories
-packaging/        Debian package builder
-tests/            integration tests
-examples/         mock UCI engine and UI snapshot harness
-```
 
 ## Files and settings
 
