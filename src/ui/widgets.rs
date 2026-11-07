@@ -110,16 +110,20 @@ impl PlayerBar {
             self.captured.remove(&child);
         }
         let scale = self.root.scale_factor().max(1);
+        let layer = gtk::Fixed::new();
         let mut previous: Option<Role> = None;
+        let mut x = 0.0;
         for role in roles {
-            let picture = piece_picture(style, *role, captured_color, 20, scale);
-            if previous == Some(*role) {
-                picture.set_margin_start(-9);
-            } else if previous.is_some() {
-                picture.set_margin_start(2);
+            if let Some(last) = previous {
+                x += if last == *role { 9.0 } else { 20.0 };
             }
+            let picture = piece_picture(style, *role, captured_color, 20, scale);
+            layer.put(&picture, x, 0.0);
             previous = Some(*role);
-            self.captured.append(&picture);
+        }
+        if previous.is_some() {
+            layer.set_size_request(x as i32 + 20, 20);
+            self.captured.append(&layer);
         }
         if advantage > 0 {
             self.advantage.set_label(&format!("+{advantage}"));
@@ -251,12 +255,28 @@ impl MoveList {
                 self.grid.attach(&number, 0, row, 1, 1);
             }
             let content = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-            let label = gtk::Label::new(Some(text));
+            let label = gtk::Label::new(None);
             label.set_xalign(0.0);
-            content.append(&label);
-            if let Some(Some(class)) = annotations.get(index) {
-                content.append(&review_icon_picture(*class, 16, self.root.scale_factor()));
+            let class = annotations.get(index).copied().flatten();
+            match class {
+                Some(class) if class.highlighted_in_list() => {
+                    content.append(&review_icon_picture(class, 18, self.root.scale_factor()));
+                }
+                _ => {
+                    let spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+                    spacer.set_size_request(if annotations.is_empty() { 0 } else { 18 }, -1);
+                    content.append(&spacer);
+                }
             }
+            match class {
+                Some(class) if class.colored_in_list() => label.set_markup(&format!(
+                    "<span foreground=\"{}\" weight=\"bold\">{}</span>",
+                    class.color(),
+                    glib::markup_escape_text(text)
+                )),
+                _ => label.set_text(text),
+            }
+            content.append(&label);
             let button = gtk::Button::builder().child(&content).build();
             button.add_css_class("flat");
             button.add_css_class("move-button");
@@ -482,6 +502,12 @@ impl Default for GameOverCard {
 type PlyCallback = Rc<dyn Fn(usize)>;
 type GraphData = Rc<RefCell<(Vec<f64>, Vec<Option<MoveClass>>, usize)>>;
 
+struct CountRow {
+    widgets: Vec<gtk::Widget>,
+    white: gtk::Label,
+    black: gtk::Label,
+}
+
 pub struct ReviewPanel {
     pub root: gtk::Box,
     pub close: gtk::Button,
@@ -493,7 +519,10 @@ pub struct ReviewPanel {
     black_name: gtk::Label,
     white_accuracy: gtk::Label,
     black_accuracy: gtk::Label,
-    counts: Vec<(gtk::Label, gtk::Label)>,
+    white_rating: gtk::Label,
+    black_rating: gtk::Label,
+    opening: gtk::Label,
+    rows: Vec<CountRow>,
     feedback_icon: gtk::Box,
     feedback_title: gtk::Label,
     feedback_detail: gtk::Label,
@@ -509,6 +538,17 @@ fn class_rgb(class: MoveClass) -> (f64, f64, f64) {
         ((value >> 8) & 0xff) as f64 / 255.0,
         (value & 0xff) as f64 / 255.0,
     )
+}
+
+fn colored_count(label: &gtk::Label, class: MoveClass, count: usize) {
+    if count == 0 {
+        label.set_markup(&format!("<span foreground=\"{}\" alpha=\"55%\">0</span>", class.color()));
+    } else {
+        label.set_markup(&format!(
+            "<span foreground=\"{}\" weight=\"heavy\">{count}</span>",
+            class.color()
+        ));
+    }
 }
 
 impl Default for ReviewPanel {
@@ -527,11 +567,14 @@ impl ReviewPanel {
         title.add_css_class("heading");
         title.set_xalign(0.0);
         title.set_hexpand(true);
+        let engine_badge = gtk::Label::new(Some("Stockfish"));
+        engine_badge.add_css_class("engine-badge");
         let close = gtk::Button::from_icon_name("window-close-symbolic");
         close.add_css_class("flat");
         close.add_css_class("circular");
         close.set_tooltip_text(Some("Close review"));
         header.append(&title);
+        header.append(&engine_badge);
         header.append(&close);
         root.append(&header);
 
@@ -550,57 +593,79 @@ impl ReviewPanel {
         graph.set_content_height(64);
         graph.add_css_class("review-graph");
         summary.append(&graph);
+
+        let opening = gtk::Label::new(None);
+        opening.add_css_class("review-opening");
+        opening.set_xalign(0.0);
+        opening.set_wrap(true);
+        summary.append(&opening);
+
         let accuracy_row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
         accuracy_row.set_homogeneous(true);
-        let column = |name: &gtk::Label, value: &gtk::Label, class: &str| {
+        let column = |name: &gtk::Label, value: &gtk::Label, rating: &gtk::Label, class: &str| {
             let block = gtk::Box::new(gtk::Orientation::Vertical, 2);
             block.add_css_class("accuracy-block");
             block.add_css_class(class);
-            name.add_css_class("caption");
+            name.add_css_class("caption-heading");
             name.set_ellipsize(gtk::pango::EllipsizeMode::End);
             value.add_css_class("accuracy-value");
             let caption = gtk::Label::new(Some("Accuracy"));
             caption.add_css_class("caption");
-            caption.add_css_class("dim-label");
+            caption.add_css_class("accuracy-caption");
+            rating.add_css_class("rating-value");
+            let rating_caption = gtk::Label::new(Some("Game Rating"));
+            rating_caption.add_css_class("caption");
+            rating_caption.add_css_class("accuracy-caption");
             block.append(name);
             block.append(value);
             block.append(&caption);
+            block.append(rating);
+            block.append(&rating_caption);
             block
         };
         let white_name = gtk::Label::new(Some("White"));
         let black_name = gtk::Label::new(Some("Black"));
         let white_accuracy = gtk::Label::new(Some("—"));
         let black_accuracy = gtk::Label::new(Some("—"));
-        accuracy_row.append(&column(&white_name, &white_accuracy, "white-side"));
-        accuracy_row.append(&column(&black_name, &black_accuracy, "black-side"));
+        let white_rating = gtk::Label::new(Some("—"));
+        let black_rating = gtk::Label::new(Some("—"));
+        accuracy_row.append(&column(&white_name, &white_accuracy, &white_rating, "white-side"));
+        accuracy_row.append(&column(&black_name, &black_accuracy, &black_rating, "black-side"));
         summary.append(&accuracy_row);
+
         let grid = gtk::Grid::new();
-        grid.set_row_spacing(3);
-        grid.set_column_spacing(10);
+        grid.set_row_spacing(7);
+        grid.set_column_spacing(14);
         grid.add_css_class("review-counts");
         let scale = root.scale_factor().max(1);
-        let mut counts = Vec::new();
+        let mut rows = Vec::new();
         for (row, class) in MoveClass::ALL.iter().enumerate() {
-            let white = gtk::Label::new(Some("0"));
-            white.add_css_class("count");
-            white.set_xalign(1.0);
-            white.set_width_chars(3);
-            let icon = review_icon_picture(*class, 18, scale);
-            icon.set_halign(gtk::Align::Center);
             let name = gtk::Label::new(Some(class.label()));
             name.set_xalign(0.0);
             name.set_hexpand(true);
+            name.add_css_class("class-name");
+            let white = gtk::Label::new(Some("0"));
+            white.add_css_class("count");
+            white.set_xalign(0.5);
+            white.set_width_chars(3);
+            let icon = review_icon_picture(*class, 22, scale);
+            icon.set_halign(gtk::Align::Center);
             let black = gtk::Label::new(Some("0"));
             black.add_css_class("count");
-            black.set_xalign(1.0);
+            black.set_xalign(0.5);
             black.set_width_chars(3);
-            grid.attach(&icon, 0, row as i32, 1, 1);
-            grid.attach(&name, 1, row as i32, 1, 1);
-            grid.attach(&white, 2, row as i32, 1, 1);
+            grid.attach(&name, 0, row as i32, 1, 1);
+            grid.attach(&white, 1, row as i32, 1, 1);
+            grid.attach(&icon, 2, row as i32, 1, 1);
             grid.attach(&black, 3, row as i32, 1, 1);
-            counts.push((white, black));
+            rows.push(CountRow {
+                widgets: vec![name.upcast(), icon.upcast(), white.clone().upcast(), black.clone().upcast()],
+                white,
+                black,
+            });
         }
         summary.append(&grid);
+
         let feedback = gtk::Box::new(gtk::Orientation::Horizontal, 10);
         feedback.add_css_class("review-feedback");
         let feedback_icon = gtk::Box::new(gtk::Orientation::Horizontal, 0);
@@ -647,17 +712,17 @@ impl ReviewPanel {
             cr.line_to(w, h / 2.0);
             let _ = cr.stroke();
             for (index, class) in classes.iter().enumerate() {
-                if let Some(class) = class.filter(|class| class.is_error() || *class == MoveClass::Brilliant || *class == MoveClass::Great) {
+                if let Some(class) = class.filter(|class| class.is_error() || matches!(class, MoveClass::Brilliant | MoveClass::Great)) {
                     let ply = index + 1;
                     let (r, g, b) = class_rgb(class);
                     let x = ply as f64 * step;
                     let y = h * (1.0 - curve.get(ply).copied().unwrap_or(50.0) / 100.0);
                     cr.set_source_rgb(r, g, b);
-                    cr.arc(x, y.clamp(3.5, h - 3.5), 3.5, 0.0, std::f64::consts::TAU);
+                    cr.arc(x, y.clamp(4.0, h - 4.0), 4.0, 0.0, std::f64::consts::TAU);
                     let _ = cr.fill();
                 }
             }
-            cr.set_source_rgb(0.18, 0.48, 0.32);
+            cr.set_source_rgb(0.25, 0.69, 0.96);
             cr.set_line_width(2.0);
             let x = (*current as f64 * step).clamp(1.0, w - 1.0);
             cr.move_to(x, 0.0);
@@ -696,7 +761,10 @@ impl ReviewPanel {
             black_name,
             white_accuracy,
             black_accuracy,
-            counts,
+            white_rating,
+            black_rating,
+            opening,
+            rows,
             feedback_icon,
             feedback_title,
             feedback_detail,
@@ -726,11 +794,46 @@ impl ReviewPanel {
         self.summary.set_visible(true);
         self.white_name.set_label(white);
         self.black_name.set_label(black);
-        self.white_accuracy.set_label(&format!("{:.1}", review.accuracy[0]));
-        self.black_accuracy.set_label(&format!("{:.1}", review.accuracy[1]));
-        for (index, (white_count, black_count)) in self.counts.iter().enumerate() {
-            white_count.set_label(&review.counts[0][index].to_string());
-            black_count.set_label(&review.counts[1][index].to_string());
+        let scored = |slot: usize| {
+            MoveClass::ALL
+                .iter()
+                .filter(|class| class.counts_for_accuracy())
+                .map(|class| review.counts[slot][class.index()])
+                .sum::<usize>()
+        };
+        let accuracy_text = |slot: usize| {
+            if scored(slot) == 0 {
+                "—".to_owned()
+            } else {
+                format!("{:.1}", review.accuracy[slot])
+            }
+        };
+        self.white_accuracy.set_label(&accuracy_text(0));
+        self.black_accuracy.set_label(&accuracy_text(1));
+        let rating = |value: Option<u32>| value.map(|elo| elo.to_string()).unwrap_or_else(|| "—".to_owned());
+        self.white_rating.set_label(&rating(review.estimated_elo[0]));
+        self.black_rating.set_label(&rating(review.estimated_elo[1]));
+        match &review.opening {
+            Some(name) => {
+                self.opening.set_markup(&format!(
+                    "<span foreground=\"{}\">📖</span>  {}",
+                    MoveClass::Book.color(),
+                    glib::markup_escape_text(name)
+                ));
+                self.opening.set_visible(true);
+            }
+            None => self.opening.set_visible(false),
+        }
+        for (index, row) in self.rows.iter().enumerate() {
+            let class = MoveClass::ALL[index];
+            let white_count = review.counts[0][index];
+            let black_count = review.counts[1][index];
+            colored_count(&row.white, class, white_count);
+            colored_count(&row.black, class, black_count);
+            let visible = class != MoveClass::Forced || white_count + black_count > 0;
+            for widget in &row.widgets {
+                widget.set_visible(visible);
+            }
         }
         {
             let mut data = self.graph_data.borrow_mut();
@@ -749,8 +852,13 @@ impl ReviewPanel {
         let scale = self.root.scale_factor().max(1);
         match current {
             Some(item) => {
-                self.feedback_icon.append(&review_icon_picture(item.class, 32, scale));
-                self.feedback_title.set_label(&format!("{} {}", item.san, item.class.article_phrase()));
+                self.feedback_icon.append(&review_icon_picture(item.class, 34, scale));
+                self.feedback_title.set_markup(&format!(
+                    "<span foreground=\"{}\" weight=\"heavy\">{}</span> {}",
+                    item.class.color(),
+                    glib::markup_escape_text(&item.san),
+                    item.class.article_phrase()
+                ));
                 let eval = review
                     .white_scores
                     .get(ply)
@@ -759,8 +867,9 @@ impl ReviewPanel {
                         other => other.display(),
                     })
                     .unwrap_or_default();
-                let detail = match (&item.best_san, item.played_best) {
-                    (Some(best), false) => format!("Best was {best}. Evaluation {eval}. Accuracy {:.0}%", item.accuracy),
+                let detail = match (&item.best_san, item.played_best, item.class) {
+                    (_, _, MoveClass::Book) => format!("Opening theory. Evaluation {eval}."),
+                    (Some(best), false, _) => format!("Best was {best}. Evaluation {eval}. Accuracy {:.0}%", item.accuracy),
                     _ => format!("Evaluation {eval}. Accuracy {:.0}%", item.accuracy),
                 };
                 self.feedback_detail.set_label(&detail);

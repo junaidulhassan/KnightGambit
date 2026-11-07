@@ -113,6 +113,35 @@ fn run_step(window: &MainWindow, shadow: &RefCell<Game>, step: &str) {
                 eprintln!("fen failed: {error}");
             }
         }
+        "drag-sidebar" => {
+            let offset: f64 = argument.parse().unwrap_or(-200.0);
+            fn find(widget: &gtk::Widget, class: &str) -> Option<gtk::Widget> {
+                if widget.has_css_class(class) {
+                    return Some(widget.clone());
+                }
+                let mut child = widget.first_child();
+                while let Some(current) = child {
+                    if let Some(found) = find(&current, class) {
+                        return Some(found);
+                    }
+                    child = current.next_sibling();
+                }
+                None
+            }
+            let root: gtk::Widget = window.window().clone().upcast();
+            if let Some(handle) = find(&root, "sidebar-handle") {
+                let controllers = handle.observe_controllers();
+                for index in 0..controllers.n_items() {
+                    if let Some(drag) = controllers.item(index).and_downcast::<gtk::GestureDrag>() {
+                        drag.emit_by_name::<()>("drag-begin", &[&0.0f64, &0.0f64]);
+                        drag.emit_by_name::<()>("drag-update", &[&offset, &0.0f64]);
+                        drag.emit_by_name::<()>("drag-end", &[&offset, &0.0f64]);
+                    }
+                }
+            } else {
+                eprintln!("sidebar handle not found");
+            }
+        }
         "action" => {
             let _ = WidgetExt::activate_action(window.window(), argument, None);
         }

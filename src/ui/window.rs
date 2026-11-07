@@ -13,6 +13,9 @@ use crate::ui::dialogs;
 use crate::ui::sound::SoundPlayer;
 use crate::ui::widgets::{AnalysisPanel, GameOverCard, MoveList, PlayerBar, ReviewPanel};
 
+const MIN_SIDEBAR_WIDTH: i32 = 300;
+const MAX_SIDEBAR_WIDTH: i32 = 900;
+
 pub struct MainWindow {
     window: adw::ApplicationWindow,
     controller: Rc<Controller>,
@@ -216,14 +219,61 @@ impl MainWindow {
         sidebar.append(&review_button);
         sidebar.append(&actions);
 
+        let sidebar_width = initial.sidebar_width.clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH) as f64;
+        let handle = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        handle.add_css_class("sidebar-handle");
+        handle.set_width_request(9);
+        handle.set_cursor_from_name(Some("col-resize"));
+        handle.set_tooltip_text(Some("Drag to resize the sidebar"));
+        let grip = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        grip.add_css_class("sidebar-grip");
+        grip.set_valign(gtk::Align::Center);
+        grip.set_halign(gtk::Align::Center);
+        grip.set_size_request(3, 48);
+        grip.set_vexpand(true);
+        handle.append(&grip);
+        let sidebar_container = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        sidebar_container.append(&handle);
+        sidebar.set_hexpand(true);
+        sidebar_container.append(&sidebar);
         let split = adw::OverlaySplitView::builder()
             .sidebar_position(gtk::PackType::End)
-            .min_sidebar_width(300.0)
-            .max_sidebar_width(380.0)
-            .sidebar_width_fraction(0.3)
+            .min_sidebar_width(sidebar_width)
+            .max_sidebar_width(sidebar_width)
+            .sidebar_width_fraction(1.0)
             .content(&board_overlay)
-            .sidebar(&sidebar)
+            .sidebar(&sidebar_container)
             .build();
+        let drag = gtk::GestureDrag::new();
+        let start_width = std::rc::Rc::new(std::cell::Cell::new(sidebar_width));
+        {
+            let split = split.clone();
+            let start_width = start_width.clone();
+            drag.connect_drag_begin(move |_, _, _| {
+                start_width.set(split.max_sidebar_width());
+            });
+        }
+        {
+            let split = split.clone();
+            let start_width = start_width.clone();
+            let window = window.clone();
+            drag.connect_drag_update(move |_, offset_x, _| {
+                let limit = (window.width() as f64 - 360.0).max(MIN_SIDEBAR_WIDTH as f64);
+                let width = (start_width.get() - offset_x)
+                    .clamp(MIN_SIDEBAR_WIDTH as f64, (MAX_SIDEBAR_WIDTH as f64).min(limit));
+                split.set_min_sidebar_width(width);
+                split.set_max_sidebar_width(width);
+            });
+        }
+        {
+            let split = split.clone();
+            let settings = settings.clone();
+            drag.connect_drag_end(move |_, _, _| {
+                let width = split.max_sidebar_width().round() as i32;
+                settings.update_silently(|settings| settings.sidebar_width = width);
+            });
+        }
+        handle.add_controller(drag);
         split
             .bind_property("show-sidebar", &sidebar_toggle, "active")
             .bidirectional()

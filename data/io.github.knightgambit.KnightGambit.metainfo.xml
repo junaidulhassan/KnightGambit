@@ -46,6 +46,22 @@
     <color type="primary" scheme_preference="dark">#1f4a33</color>
   </branding>
   <releases>
+    <release version="1.0.4" date="2026-11-07">
+      <description>
+        <p>Wider sidebar that can be resized by dragging its left edge; the chosen width is remembered.</p>
+      </description>
+    </release>
+    <release version="1.0.3" date="2026-11-07">
+      <description>
+        <p>Stricter Game Review: accuracy now uses a harmonic and volatility-weighted average, material thrown away is always penalized, and blunders weigh much more on accuracy and estimated rating.</p>
+      </description>
+    </release>
+    <release version="1.0.2" date="2026-11-07">
+      <description>
+        <p>Game Review and live analysis now always use Stockfish at full strength.</p>
+        <p>New Book classification with an offline opening book and opening names, estimated game ratings, colored move list and a redesigned summary table.</p>
+      </description>
+    </release>
     <release version="1.0.1" date="2026-11-07">
       <description>
         <p>Game Review with Brilliant, Great, Best, Excellent, Good, Forced, Inaccuracy, Mistake, Miss and Blunder classifications, accuracy scores, an evaluation graph and best-move arrows.</p>

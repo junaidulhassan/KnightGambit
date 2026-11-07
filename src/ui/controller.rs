@@ -47,6 +47,13 @@ pub struct Ui {
     pub review_button: gtk::Button,
 }
 
+struct AnalyzerLink {
+    session: EngineSession,
+    generation: u64,
+    name: String,
+    ready: bool,
+}
+
 struct ReviewJob {
     session: EngineSession,
     generation: u64,
@@ -117,6 +124,9 @@ pub struct Controller {
     weak_self: RefCell<Weak<Controller>>,
     review: RefCell<Option<GameReview>>,
     review_job: RefCell<Option<ReviewJob>>,
+    analyzer: RefCell<Option<AnalyzerLink>>,
+    analysis_search: RefCell<Option<ActiveSearch>>,
+    analyzer_generation: Cell<u64>,
     review_generation: Cell<u64>,
     loaded_piece_dir: RefCell<Option<Option<String>>>,
 }
@@ -185,6 +195,9 @@ impl Controller {
             weak_self: RefCell::new(Weak::new()),
             review: RefCell::new(None),
             review_job: RefCell::new(None),
+            analyzer: RefCell::new(None),
+            analysis_search: RefCell::new(None),
+            analyzer_generation: Cell::new(0),
             review_generation: Cell::new(0),
             loaded_piece_dir: RefCell::new(None),
         });
@@ -434,8 +447,10 @@ impl Controller {
         self.settings.update_silently(|settings| settings.last_game = config.clone());
         self.ui.board.set_flipped(flipped);
 
-        let wants_engine = config.mode == GameMode::VersusEngine
-            || (config.mode == GameMode::Practice && engine_record.is_some());
+        let wants_engine = config.mode == GameMode::VersusEngine;
+        if !matches!(config.mode, GameMode::Practice) {
+            self.drop_analyzer();
+        }
         if wants_engine {
             if let Some(record) = engine_record {
                 self.ensure_engine(record, config.strength);
@@ -566,6 +581,7 @@ impl Controller {
     }
 
     pub fn shutdown(&self) {
+        self.drop_analyzer();
         self.stop_review_job();
         self.stop_clock_timer();
         self.drop_engine();
@@ -629,8 +645,13 @@ impl Controller {
     }
 
     fn schedule_engine(&self) {
+        self.schedule_move_search();
+        self.schedule_analysis();
+        self.refresh_thinking();
+    }
+
+    fn schedule_move_search(&self) {
         if !self.engine_ready() {
-            self.refresh_thinking();
             return;
         }
         let over = self.game.borrow().is_over();
@@ -647,17 +668,177 @@ impl Controller {
             }
             let live = self.game.borrow().current().clone();
             self.request_search(SearchPurpose::Move, live);
-        } else if self.wants_background_analysis() {
-            let position = self.game.borrow().position_at(self.view_ply.get()).clone();
-            if position.is_game_over() {
-                self.cancel_search();
-            } else {
-                self.request_search(SearchPurpose::Analysis, position);
-            }
         } else {
             self.cancel_search();
         }
-        self.refresh_thinking();
+    }
+
+    fn stockfish_record(&self) -> Option<EngineRecord> {
+        let existing = self.registry.borrow().find_by_catalog("stockfish").cloned();
+        if let Some(record) = existing {
+            return record.is_available().then_some(record);
+        }
+        let detected = self
+            .registry
+            .borrow()
+            .detect_system_engines()
+            .into_iter()
+            .find(|engine| engine.definition.id == "stockfish")?;
+        let threads = self.settings.with(|s| EngineRegistry::default_threads(s.max_threads));
+        let record = EngineRecord {
+            id: "stockfish".to_owned(),
+            catalog_id: Some("stockfish".to_owned()),
+            display_name: "Stockfish".to_owned(),
+            executable: detected.executable,
+            source: crate::engine::registry::EngineSource::System,
+            threads,
+            hash_mb: 128,
+            ..EngineRecord::default()
+        };
+        let mut registry = self.registry.borrow_mut();
+        registry.upsert(record.clone());
+        let _ = registry.save();
+        Some(record)
+    }
+
+    fn full_strength_config(&self, record: &EngineRecord, multipv: u32) -> crate::engine::session::SessionConfig {
+        let (max_threads, max_hash) = self.settings.with(|s| (s.max_threads, s.max_hash_mb));
+        let mut strongest = record.clone();
+        strongest.threads = max_threads.max(1);
+        strongest.hash_mb = max_hash.max(16);
+        let mut config = session_config(&strongest, max_threads, max_hash);
+        config.options.push(("UCI_LimitStrength".to_owned(), "false".to_owned()));
+        config.options.push(("Skill Level".to_owned(), "20".to_owned()));
+        config.options.push(("MultiPV".to_owned(), multipv.to_string()));
+        config
+    }
+
+    fn ensure_analyzer(&self) -> bool {
+        if self.analyzer.borrow().as_ref().is_some_and(|link| !link.session.is_dead()) {
+            return true;
+        }
+        self.analyzer.replace(None);
+        let Some(record) = self.stockfish_record() else {
+            return false;
+        };
+        let config = self.full_strength_config(&record, 1);
+        match EngineSession::start(&config) {
+            Ok((session, events)) => {
+                let generation = self.analyzer_generation.get() + 1;
+                self.analyzer_generation.set(generation);
+                self.analyzer.replace(Some(AnalyzerLink {
+                    session,
+                    generation,
+                    name: "Stockfish".to_owned(),
+                    ready: false,
+                }));
+                let weak = self.weak();
+                glib::spawn_future_local(async move {
+                    while let Ok(event) = events.recv().await {
+                        let Some(controller) = weak.upgrade() else { break };
+                        let produced = {
+                            let mut analyzer = controller.analyzer.borrow_mut();
+                            match analyzer.as_mut() {
+                                Some(link) if link.generation == generation => link.session.handle(event),
+                                _ => break,
+                            }
+                        };
+                        for session_event in produced {
+                            controller.on_analyzer_event(session_event);
+                        }
+                    }
+                });
+                true
+            }
+            Err(error) => {
+                self.toast(&format!("Could not start Stockfish for analysis: {error}"));
+                false
+            }
+        }
+    }
+
+    fn drop_analyzer(&self) {
+        if let Some(mut link) = self.analyzer.take() {
+            link.session.shutdown();
+        }
+        self.analysis_search.replace(None);
+    }
+
+    fn on_analyzer_event(&self, event: SessionEvent) {
+        match event {
+            SessionEvent::Ready(identity) => {
+                if let Some(link) = self.analyzer.borrow_mut().as_mut() {
+                    link.ready = true;
+                    if !identity.name.is_empty() {
+                        link.name = identity.name;
+                    }
+                }
+                self.schedule_analysis();
+            }
+            SessionEvent::Info { search_id, info } => self.on_analysis_info(search_id, info),
+            SessionEvent::BestMove { .. } => {}
+            SessionEvent::Failed(message) => {
+                self.drop_analyzer();
+                self.toast(&format!("Stockfish analysis stopped: {message}"));
+            }
+        }
+    }
+
+    fn cancel_analysis(&self) {
+        if let Some(link) = self.analyzer.borrow_mut().as_mut() {
+            link.session.cancel();
+        }
+        self.analysis_search.replace(None);
+    }
+
+    fn schedule_analysis(&self) {
+        if !self.wants_background_analysis() {
+            self.cancel_analysis();
+            return;
+        }
+        if !self.ensure_analyzer() {
+            self.ui.analysis.show(
+                "Stockfish analysis",
+                "—",
+                0.5,
+                "Install Stockfish from Engines to see live analysis",
+                "",
+            );
+            return;
+        }
+        if !self.analyzer.borrow().as_ref().is_some_and(|link| link.ready) {
+            self.ui.analysis.reset("Stockfish");
+            return;
+        }
+        let position = self.game.borrow().position_at(self.view_ply.get()).clone();
+        if position.is_game_over() {
+            self.cancel_analysis();
+            return;
+        }
+        let id = self.search_counter.get() + 1;
+        self.search_counter.set(id);
+        let request = SearchRequest {
+            id,
+            position: self.position_command_for(SearchPurpose::Analysis),
+            go: "go infinite".to_owned(),
+        };
+        let result = match self.analyzer.borrow_mut().as_mut() {
+            Some(link) => link.session.search(request),
+            None => return,
+        };
+        match result {
+            Ok(()) => {
+                self.analysis_search.replace(Some(ActiveSearch {
+                    id,
+                    purpose: SearchPurpose::Analysis,
+                    position,
+                    started: Instant::now(),
+                }));
+                let title = self.engine_title();
+                self.ui.analysis.reset(&title);
+            }
+            Err(error) => self.toast(&error),
+        }
     }
 
     fn position_command_for(&self, purpose: SearchPurpose) -> String {
@@ -674,7 +855,7 @@ impl Controller {
         let id = self.search_counter.get() + 1;
         self.search_counter.set(id);
         let go = match purpose {
-            SearchPurpose::Analysis => "go infinite".to_owned(),
+            SearchPurpose::Analysis => return,
             SearchPurpose::Move => {
                 let plan = self
                     .engine
@@ -713,10 +894,6 @@ impl Controller {
                     position,
                     started: Instant::now(),
                 }));
-                if purpose == SearchPurpose::Analysis {
-                    let title = self.engine_title();
-                    self.ui.analysis.reset(&title);
-                }
             }
             Err(error) => self.toast(&error),
         }
@@ -731,17 +908,11 @@ impl Controller {
     }
 
     fn engine_title(&self) -> String {
-        self.engine
+        self.analyzer
             .borrow()
             .as_ref()
-            .map(|link| {
-                link.identity
-                    .as_ref()
-                    .map(|identity| identity.name.clone())
-                    .filter(|name| !name.is_empty())
-                    .unwrap_or_else(|| link.record.display_name.clone())
-            })
-            .unwrap_or_else(|| "Engine analysis".to_owned())
+            .map(|link| link.name.clone())
+            .unwrap_or_else(|| "Stockfish".to_owned())
     }
 
     fn pv_to_san(position: &Chess, pv: &[String], limit: usize) -> String {
@@ -771,16 +942,18 @@ impl Controller {
             return;
         };
         let Some(score) = info.score else { return };
-        if info.pv.is_empty() {
-            return;
-        }
-        if active.purpose == SearchPurpose::Move && !info.is_bound {
+        if active.purpose == SearchPurpose::Move && !info.is_bound && !info.pv.is_empty() {
             self.engine_eval.set(Some(score.as_centipawns().clamp(-100_000, 100_000)));
         }
-        if !self.settings.with(|s| s.show_analysis) {
+    }
+
+    fn on_analysis_info(&self, search_id: u64, info: SearchInfo) {
+        let active = self.analysis_search.borrow().clone();
+        let Some(active) = active.filter(|search| search.id == search_id) else {
             return;
-        }
-        if active.purpose == SearchPurpose::Move && self.mode() == GameMode::VersusEngine && !self.game.borrow().is_over() {
+        };
+        let Some(score) = info.score else { return };
+        if info.pv.is_empty() || !self.settings.with(|s| s.show_analysis) {
             return;
         }
         let now = Instant::now();
@@ -1204,7 +1377,7 @@ impl Controller {
         self.ui
             .analysis
             .root
-            .set_visible(settings.show_analysis && self.analysis_relevant() && self.engine.borrow().is_some() && !self.review_active());
+            .set_visible(settings.show_analysis && self.analysis_relevant() && !self.review_active());
         self.ui.review_button.set_sensitive(has_moves && self.review_job.borrow().is_none());
         self.refresh_review_panel();
         self.refresh_status();
@@ -1539,6 +1712,9 @@ impl Controller {
     }
 
     pub fn engine_record_changed(&self, id: &str) {
+        if id == "stockfish" {
+            self.drop_analyzer();
+        }
         let is_current = self.current_engine_id().as_deref() == Some(id);
         if is_current && (self.game.borrow().is_over() || self.mode() == GameMode::Practice) {
             self.drop_engine();
@@ -1596,26 +1772,23 @@ impl Controller {
             self.toast("Play or load a game before starting a review");
             return;
         }
-        let record = self
-            .engine
-            .borrow()
-            .as_ref()
-            .map(|link| link.record.clone())
-            .or_else(|| self.resolve_engine(&self.config()));
-        let Some(record) = record else {
-            self.toast("Install a chess engine to review games");
-            let _ = WidgetExt::activate_action(&self.ui.window, "win.engines", None);
+        let Some(record) = self.stockfish_record() else {
+            let toast = adw::Toast::builder()
+                .title("Game Review uses Stockfish — install it to review your games")
+                .button_label("Engines")
+                .action_name("win.engines")
+                .timeout(8)
+                .build();
+            self.ui.toasts.add_toast(toast);
             return;
         };
         self.stop_review_job();
         self.review.replace(None);
         self.cancel_search();
         self.ui.game_over.dismiss();
-        let (max_threads, max_hash, movetime) =
-            self.settings.with(|s| (s.max_threads, s.max_hash_mb, s.review_depth.movetime_ms()));
-        let mut config = session_config(&record, max_threads, max_hash);
-        config.options.push(("UCI_LimitStrength".to_owned(), "false".to_owned()));
-        config.options.push(("MultiPV".to_owned(), "2".to_owned()));
+        self.cancel_analysis();
+        let movetime = self.settings.with(|s| s.review_depth.movetime_ms());
+        let config = self.full_strength_config(&record, 2);
         let (positions, evals) = {
             let game = self.game.borrow();
             let mut positions = Vec::with_capacity(ply_count + 1);

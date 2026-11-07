@@ -239,6 +239,7 @@ pub struct Settings {
     pub window_width: i32,
     pub window_height: i32,
     pub window_maximized: bool,
+    pub sidebar_width: i32,
 }
 
 impl Default for Settings {
@@ -276,6 +277,7 @@ impl Default for Settings {
             window_width: 1240,
             window_height: 860,
             window_maximized: false,
+            sidebar_width: 430,
         }
     }
 }

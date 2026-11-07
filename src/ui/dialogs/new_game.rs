@@ -160,6 +160,30 @@ pub fn present(controller: &Rc<Controller>) {
     engine_group.add(&manage);
     page.add(&engine_group);
 
+    let stockfish_ready = controller
+        .registry()
+        .borrow()
+        .find_by_catalog("stockfish")
+        .is_some_and(|record| record.is_available())
+        || !controller
+            .registry()
+            .borrow()
+            .detect_system_engines()
+            .iter()
+            .all(|engine| engine.definition.id != "stockfish");
+    let analysis_group = adw::PreferencesGroup::builder().title("Analysis").build();
+    let analysis_row = adw::ActionRow::builder()
+        .title("Live analysis by Stockfish")
+        .subtitle(if stockfish_ready {
+            "Full-strength evaluation and best line while you practice"
+        } else {
+            "Install Stockfish from Engines to enable live analysis and Game Review"
+        })
+        .build();
+    analysis_row.add_prefix(&gtk::Image::from_icon_name("kg-engine-symbolic"));
+    analysis_group.add(&analysis_row);
+    page.add(&analysis_group);
+
     let clock_group = adw::PreferencesGroup::builder().title("Time Control").build();
     let clock_switch = adw::SwitchRow::builder()
         .title("Use chess clock")
@@ -280,6 +304,7 @@ pub fn present(controller: &Rc<Controller>) {
         let form = form.clone();
         let color_group = color_group.clone();
         let engine_group = engine_group.clone();
+        let analysis_group = analysis_group.clone();
         let clock_group = clock_group.clone();
         let custom_group = custom_group.clone();
         let engine_row = engine_row.clone();
@@ -298,13 +323,8 @@ pub fn present(controller: &Rc<Controller>) {
             let mode = form.mode.get();
             let has_engines = !form.engines.borrow().is_empty();
             color_group.set_visible(mode == GameMode::VersusEngine);
-            engine_group.set_visible(mode != GameMode::TwoPlayers);
-            engine_group.set_title(if mode == GameMode::Practice { "Analysis Engine" } else { "Opponent" });
-            engine_group.set_description(if mode == GameMode::Practice {
-                Some("Optional live evaluation while you practice")
-            } else {
-                None
-            });
+            engine_group.set_visible(mode == GameMode::VersusEngine);
+            analysis_group.set_visible(mode == GameMode::Practice);
             no_engine.set_visible(!has_engines);
             engine_row.set_visible(has_engines);
             let playing = mode == GameMode::VersusEngine && has_engines;

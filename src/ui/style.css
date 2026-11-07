@@ -257,3 +257,55 @@ label.error {
   padding-top: 6px;
   border-top: 1px solid alpha(currentColor, 0.12);
 }
+
+.review-card .engine-badge {
+  font-size: 0.8em;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background-color: alpha(#81b64c, 0.18);
+  color: #5f9a2e;
+}
+
+.review-card .accuracy-block .accuracy-caption {
+  opacity: 0.65;
+}
+
+.review-card .rating-value {
+  font-size: 1.15em;
+  font-weight: 800;
+  font-feature-settings: "tnum";
+  margin-top: 4px;
+}
+
+.review-card .review-opening {
+  font-weight: 600;
+  padding: 4px 2px;
+}
+
+.review-card .review-counts .class-name {
+  font-weight: 600;
+}
+
+.review-card .review-counts .count {
+  font-size: 1.05em;
+  font-feature-settings: "tnum";
+}
+
+.sidebar-handle {
+  background-color: transparent;
+  transition: background-color 150ms ease;
+}
+
+.sidebar-handle:hover {
+  background-color: alpha(@accent_bg_color, 0.12);
+}
+
+.sidebar-handle .sidebar-grip {
+  border-radius: 3px;
+  background-color: alpha(currentColor, 0.22);
+}
+
+.sidebar-handle:hover .sidebar-grip {
+  background-color: @accent_bg_color;
+}

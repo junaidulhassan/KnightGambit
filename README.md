@@ -29,13 +29,20 @@ implements the complete official rules of chess, and plays against genuine open-
   en passant, promotion and insufficient material. Threefold repetition and the fifty-move rule are claimable;
   fivefold repetition, the seventy-five-move rule (unless the last move mates) and dead positions end the game
   automatically. Running out of time against a lone king (insufficient mating material) is a draw.
-- **Game Review**: after any game (or an imported PGN), the engine analyzes every position at full strength
-  with two principal variations and classifies each move as Brilliant, Great, Best, Excellent, Good,
-  Forced (the only legal move), Inaccuracy, Mistake, Miss (failing to punish the opponent's mistake or
-  blunder) or Blunder. Classifications use the win-probability drop from the engine's best move;
-  Brilliant marks a sound piece sacrifice and Great marks the only good move. Review shows badges in the move
-  list and on the board, a green arrow for the best alternative, accuracy for both players, per-class counts,
-  and a clickable evaluation graph. Review depth is configurable (Fast, Standard, Deep).
+- **Game Review**: after any game (or an imported PGN), **Stockfish** analyzes every position at full strength
+  (all allowed threads and hash, two principal variations), no matter which engine you played. Each move is
+  classified as Brilliant, Great, Book, Best, Excellent, Good, Forced (the only legal move), Inaccuracy,
+  Mistake, Miss (failing to punish the opponent's mistake or blunder) or Blunder. Classifications use the
+  larger of the win-probability drop and the material (centipawn) loss against Stockfish's best move, so pieces
+  thrown away are penalized even in already lost positions; Brilliant marks a sound piece sacrifice, Great marks the
+  only good move, and Book marks opening theory from a built-in offline book of more than 200 main lines,
+  which also names the opening. Moves are colored by class in the move list with a badge next to notable
+  ones, the board shows the badge and a sky-blue arrow for the best alternative, and the summary shows each
+  player's accuracy (harmonic and volatility-weighted average, so a few blunders cannot hide behind many easy
+  moves), an estimated game rating (Elo) derived from accuracy and blunder rate, colored
+  per-class counts and a clickable evaluation graph. Review depth is configurable (Fast, Standard, Deep).
+- **Live analysis**: in practice mode and after a game, Stockfish evaluates the position you are viewing at
+  full strength and shows the evaluation, depth and best line. Opponent engines are never used for analysis.
 - **Premoves**: while the engine is thinking, drag or click your next move. It is highlighted in red and
   played the instant the engine replies, if it is still legal. Right-click or Escape cancels it. Premoves can
   be turned off in Preferences → Gameplay.
@@ -57,8 +64,8 @@ implements the complete official rules of chess, and plays against genuine open-
   analysis.
 - **Files**: PGN import and export (including games from custom positions), FEN loading and copying, and
   opening `.pgn` files from the file manager.
-- **Desktop integration**: light, dark and system theme, an adaptive layout that collapses the sidebar on narrow
-  windows, fullscreen with a maximized board, keyboard shortcuts, synthesized wooden sound effects, and settings
+- **Desktop integration**: light, dark and system theme, a resizable sidebar (drag its left edge; the width is
+  remembered), an adaptive layout that collapses the sidebar on narrow windows, fullscreen with a maximized board, keyboard shortcuts, synthesized wooden sound effects, and settings
   persisted between sessions.
 
 ## Requirements
@@ -85,7 +92,7 @@ cargo run --release
 
 ```bash
 make deb
-sudo apt install ./dist/knightgambit_1.0.1_amd64.deb
+sudo apt install ./dist/knightgambit_1.0.4_amd64.deb
 ```
 
 KnightGambit then appears in the GNOME application grid with its icon and desktop entry.
@@ -161,7 +168,7 @@ The test suites cover:
 - `tests/engine_session.rs`: a scripted mock engine exercising the handshake, searches, superseded and
   cancelled searches, crashes, probing and engine registry persistence.
 - `tests/review_premove.rs`: premove geometry, promotion detection, win-percentage and accuracy formulas,
-  sacrifice detection, and full-game move classification including checkmate, Forced and Miss handling.
+  sacrifice detection, opening book legality, Book detection and opening names, Elo estimation, and full-game move classification including checkmate, Forced and Miss handling.
 - `tests/settings.rs`: settings persistence and corruption recovery, board presets, piece rendering coverage
   at several sizes, and texture determinism.
 

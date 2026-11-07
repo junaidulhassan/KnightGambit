@@ -11,7 +11,9 @@ cargo build --release --manifest-path "$ROOT/Cargo.toml"
 
 make -C "$ROOT" install DESTDIR="$STAGE" PREFIX=/usr TARGET_DIR="$TARGET_DIR" CARGO=true
 install -Dm644 "$ROOT/LICENSE" "$STAGE/usr/share/doc/knightgambit/copyright"
-install -Dm644 "$ROOT/THIRD_PARTY.md" "$STAGE/usr/share/doc/knightgambit/THIRD_PARTY.md"
+if [ -f "$ROOT/THIRD_PARTY.md" ]; then
+    install -Dm644 "$ROOT/THIRD_PARTY.md" "$STAGE/usr/share/doc/knightgambit/THIRD_PARTY.md"
+fi
 install -Dm644 "$ROOT/README.md" "$STAGE/usr/share/doc/knightgambit/README.md"
 
 INSTALLED_SIZE="$(du -sk "$STAGE/usr" | cut -f1)"
