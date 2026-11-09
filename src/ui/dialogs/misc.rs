@@ -43,6 +43,8 @@ const SHORTCUTS: [(&str, &[(&str, &str)]); 4] = [
             ("Fullscreen", "F11"),
             ("Toggle sidebar", "F9"),
             ("Engines", "<Control>e"),
+            ("Game history", "<Control>h"),
+            ("Statistics & analytics", "<Control>i"),
             ("Preferences", "<Control>comma"),
             ("Keyboard shortcuts", "<Control>question"),
             ("Quit", "<Control>q"),

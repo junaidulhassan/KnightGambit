@@ -1,4 +1,9 @@
+mod eco;
+mod live;
 mod openings;
+
+pub use eco::{eco_code, opening_family, opening_of};
+pub use live::{EvalCache, MoveFeedback, READY_DEPTH, feedback_for_move, is_ready, position_key, white_share};
 
 pub use openings::{OPENING_LINES, OpeningBook, invalid_lines, opening_book};
 
@@ -380,6 +385,88 @@ fn uci_to_san(position: &Chess, uci: &str) -> Option<String> {
     Some(San::from_move(position, mv).to_string())
 }
 
+/// Everything needed to classify one move.
+pub struct MoveInput<'a> {
+    pub before_position: &'a Chess,
+    pub after_position: &'a Chess,
+    pub played: &'a crate::chess::PlayedMove,
+    /// Engine evaluation of the position before the move (side to move's view).
+    pub before: &'a PositionEval,
+    /// Engine evaluation of the position after the move (side to move's view).
+    pub after: &'a PositionEval,
+    /// The line is still inside the opening book.
+    pub in_book: bool,
+    /// The opponent's previous move was a mistake or blunder.
+    pub opponent_erred: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MoveVerdict {
+    pub class: MoveClass,
+    pub win_before: f64,
+    pub win_after: f64,
+    pub loss: f64,
+    pub accuracy: f64,
+    pub played_best: bool,
+}
+
+/// Classifies a single move. Used for full-game reviews and live feedback so
+/// both always agree.
+pub fn classify_move(input: &MoveInput<'_>) -> MoveVerdict {
+    let MoveInput {
+        before_position,
+        after_position,
+        played,
+        before,
+        after,
+        in_book,
+        opponent_erred,
+    } = *input;
+    let win_before = win_percent(before.score);
+    let delivered_mate = after_position.is_checkmate();
+    let win_after = if delivered_mate { 100.0 } else { win_percent(after.score.negate()) };
+    let loss = effective_loss(before.score, after.score, win_before, win_after, delivered_mate);
+    let legal_count = before_position.legal_moves().len();
+    let played_best = before.best.as_deref() == Some(played.uci.as_str()) || legal_count == 1;
+    let second_gap = before
+        .second
+        .map(|second| win_before - win_percent(second))
+        .unwrap_or(0.0);
+    let class = if in_book {
+        MoveClass::Book
+    } else if legal_count == 1 {
+        MoveClass::Forced
+    } else if played_best || loss < 0.6 {
+        if loss <= 2.0 && win_after >= 45.0 && win_before < 97.0 && legal_count > 1 && is_sacrifice(before_position, &played.mv) {
+            MoveClass::Brilliant
+        } else if legal_count > 1 && second_gap >= 15.0 && win_before < 97.0 && win_after >= 30.0 {
+            MoveClass::Great
+        } else {
+            MoveClass::Best
+        }
+    } else if loss <= 2.0 {
+        MoveClass::Excellent
+    } else if loss <= 5.0 {
+        MoveClass::Good
+    } else if opponent_erred && win_after >= 35.0 {
+        MoveClass::Miss
+    } else if loss <= 10.0 {
+        MoveClass::Inaccuracy
+    } else if loss <= 20.0 {
+        MoveClass::Mistake
+    } else {
+        MoveClass::Blunder
+    };
+    MoveVerdict {
+        class,
+        win_before,
+        win_after,
+        loss,
+        accuracy: move_accuracy(loss),
+        played_best,
+    }
+}
+
 pub fn classify_game(game: &Game, evals: &[PositionEval]) -> GameReview {
     let plies = game.ply_count().min(evals.len().saturating_sub(1));
     let mut moves = Vec::with_capacity(plies);
@@ -397,90 +484,56 @@ pub fn classify_game(game: &Game, evals: &[PositionEval]) -> GameReview {
         };
         white_curve.push(white_win);
     }
-    let mut totals = [0.0f64; 2];
     let mut tallies = [0usize; 2];
     let mut counts = [[0usize; CLASS_COUNT]; 2];
-    let mut previous: Option<(MoveClass, f64)> = None;
+    let mut previous: Option<MoveClass> = None;
     let book = opening_book();
     let mut in_book = game.starts_from_standard_position();
     let mut opening: Option<String> = None;
     for index in 0..plies {
         let before_position = game.position_at(index);
+        let after_position = game.position_at(index + 1);
         let played = &game.moves()[index];
         let mover = before_position.turn();
-        let before = &evals[index];
-        let after = &evals[index + 1];
-        let win_before = win_percent(before.score);
-        let win_after = if game.position_at(index + 1).is_checkmate() {
-            100.0
-        } else {
-            win_percent(after.score.negate())
-        };
-        let loss = effective_loss(before.score, after.score, win_before, win_after, game.position_at(index + 1).is_checkmate());
-        let legal_count = before_position.legal_moves().len();
-        let played_best = before.best.as_deref() == Some(played.uci.as_str()) || legal_count == 1;
-        let second_gap = before
-            .second
-            .map(|second| win_before - win_percent(second))
-            .unwrap_or(0.0);
-        let opponent_erred = previous.is_some_and(|(class, _)| matches!(class, MoveClass::Mistake | MoveClass::Blunder));
-        let after_position = game.position_at(index + 1);
         in_book = in_book && book.contains(after_position);
         if in_book && let Some(name) = book.name_of(after_position) {
             opening = Some(name.to_owned());
         }
-        let class = if in_book {
-            MoveClass::Book
-        } else if legal_count == 1 {
-            MoveClass::Forced
-        } else if played_best || loss < 0.6 {
-            if loss <= 2.0 && win_after >= 45.0 && win_before < 97.0 && legal_count > 1 && is_sacrifice(before_position, &played.mv) {
-                MoveClass::Brilliant
-            } else if legal_count > 1 && second_gap >= 15.0 && win_before < 97.0 && win_after >= 30.0 {
-                MoveClass::Great
-            } else {
-                MoveClass::Best
-            }
-        } else if loss <= 2.0 {
-            MoveClass::Excellent
-        } else if loss <= 5.0 {
-            MoveClass::Good
-        } else if opponent_erred && win_after >= 35.0 {
-            MoveClass::Miss
-        } else if loss <= 10.0 {
-            MoveClass::Inaccuracy
-        } else if loss <= 20.0 {
-            MoveClass::Mistake
-        } else {
-            MoveClass::Blunder
-        };
-        let accuracy = move_accuracy(loss);
+        let verdict = classify_move(&MoveInput {
+            before_position,
+            after_position,
+            played,
+            before: &evals[index],
+            after: &evals[index + 1],
+            in_book,
+            opponent_erred: previous.is_some_and(|class| matches!(class, MoveClass::Mistake | MoveClass::Blunder)),
+        });
+        let class = verdict.class;
         let slot = match mover {
             Color::White => 0,
             Color::Black => 1,
         };
         if class.counts_for_accuracy() {
-            totals[slot] += accuracy;
             tallies[slot] += 1;
         }
         counts[slot][class.index()] += 1;
-        previous = Some((class, loss));
+        previous = Some(class);
+        let before = &evals[index];
         let best_san = before.best.as_deref().and_then(|uci| uci_to_san(before_position, uci));
         moves.push(MoveReview {
             ply: index + 1,
             mover,
             class,
             san: played.san.clone(),
-            win_before,
-            win_after,
-            loss,
-            accuracy,
+            win_before: verdict.win_before,
+            win_after: verdict.win_after,
+            loss: verdict.loss,
+            accuracy: verdict.accuracy,
             best_uci: before.best.clone(),
             best_san,
-            played_best,
+            played_best: verdict.played_best,
         });
     }
-    let _ = totals;
     let accuracy = game_accuracy(&white_curve, &moves);
     let estimated_elo = [0, 1].map(|slot| {
         estimate_elo(accuracy[slot], tallies[slot], counts[slot][MoveClass::Blunder.index()])

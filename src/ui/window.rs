@@ -6,6 +6,7 @@ use gtk::{gdk, gio, glib};
 
 use crate::app::{APP_ID, APP_NAME, paths};
 use crate::engine::registry::EngineRegistry;
+use crate::history::HistoryStore;
 use crate::settings::SettingsStore;
 use crate::ui::board::{BoardFrame, BoardWidget};
 use crate::ui::controller::{Controller, Ui};
@@ -50,6 +51,8 @@ fn build_menu() -> gio::Menu {
     menu.append_section(None, &files);
     let review = gio::Menu::new();
     review.append(Some("Game _Review"), Some("win.review"));
+    review.append(Some("Game _History"), Some("win.history"));
+    review.append(Some("_Statistics & Analytics"), Some("win.statistics"));
     menu.append_section(None, &review);
     let view = gio::Menu::new();
     view.append(Some("_Flip Board"), Some("win.flip"));
@@ -66,7 +69,12 @@ fn build_menu() -> gio::Menu {
 }
 
 impl MainWindow {
-    pub fn new(application: &adw::Application, settings: SettingsStore, registry: Rc<RefCell<EngineRegistry>>) -> Self {
+    pub fn new(
+        application: &adw::Application,
+        settings: SettingsStore,
+        registry: Rc<RefCell<EngineRegistry>>,
+        history: HistoryStore,
+    ) -> Self {
         let initial = settings.get();
         let window = adw::ApplicationWindow::builder()
             .application(application)
@@ -104,6 +112,10 @@ impl MainWindow {
             .build();
         header.pack_end(&sidebar_toggle);
         header.pack_end(&icon_button("kg-engine-symbolic", "Engines (Ctrl+E)", "win.engines"));
+        let history_button = icon_button("kg-history-symbolic", "Game history (Ctrl+H)", "win.history");
+        let statistics_button = icon_button("kg-stats-symbolic", "Statistics & analytics (Ctrl+I)", "win.statistics");
+        header.pack_end(&history_button);
+        header.pack_end(&statistics_button);
 
         let board = BoardWidget::new();
         let top_bar = PlayerBar::new();
@@ -293,6 +305,8 @@ impl MainWindow {
             adw::LengthUnit::Sp,
         ));
         breakpoint.add_setter(&split, "collapsed", Some(&true.to_value()));
+        breakpoint.add_setter(&history_button, "visible", Some(&false.to_value()));
+        breakpoint.add_setter(&statistics_button, "visible", Some(&false.to_value()));
         window.add_breakpoint(breakpoint);
 
         let ui = Ui {
@@ -320,7 +334,7 @@ impl MainWindow {
             review_button,
         };
         let sounds = SoundPlayer::new(&paths::sounds_dir());
-        let controller = Controller::new(ui, settings.clone(), registry, sounds);
+        let controller = Controller::new(ui, settings.clone(), registry, sounds, history);
 
         let main = Self { window, controller };
         main.install_actions(&split, &toolbar, &exit_fullscreen);
@@ -417,6 +431,8 @@ impl MainWindow {
         self.add_action("last", |controller| controller.go_to_live());
         self.add_action("preferences", dialogs::preferences::present);
         self.add_action("engines", dialogs::engines::present);
+        self.add_action("history", dialogs::history::present);
+        self.add_action("statistics", dialogs::statistics::present);
         self.add_action("shortcuts", dialogs::misc::present_shortcuts);
         self.add_action("about", dialogs::misc::present_about);
         self.add_action("load-fen", dialogs::misc::present_fen_loader);
@@ -457,7 +473,7 @@ impl MainWindow {
         });
 
         if let Some(application) = self.window.application() {
-            let accels: [(&str, &[&str]); 17] = [
+            let accels: [(&str, &[&str]); 19] = [
                 ("win.review", &["<Control><Shift>r"]),
                 ("win.new-game", &["<Control>n"]),
                 ("win.restart", &["<Control>r"]),
@@ -467,6 +483,8 @@ impl MainWindow {
                 ("win.toggle-sidebar", &["F9"]),
                 ("win.preferences", &["<Control>comma"]),
                 ("win.engines", &["<Control>e"]),
+                ("win.history", &["<Control>h"]),
+                ("win.statistics", &["<Control>i"]),
                 ("win.shortcuts", &["<Control>question"]),
                 ("win.load-fen", &["<Control>l"]),
                 ("win.copy-fen", &["<Control><Shift>c"]),

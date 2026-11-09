@@ -309,3 +309,57 @@ label.error {
 .sidebar-handle:hover .sidebar-grip {
   background-color: @accent_bg_color;
 }
+
+/* ---- Game history & statistics ---- */
+.history-result {
+  min-width: 26px;
+  min-height: 26px;
+  border-radius: 13px;
+  font-weight: 800;
+  font-size: 0.85em;
+  color: #fff;
+  padding: 0 2px;
+}
+.history-result.win { background-color: #3f9b6a; }
+.history-result.loss { background-color: #d9564a; }
+.history-result.draw { background-color: #8d949b; }
+
+.history-result-line { font-weight: 700; }
+.history-result-line.win { color: #2f8556; }
+.history-result-line.loss { color: #c4453a; }
+.history-result-line.draw { color: alpha(currentColor, 0.7); }
+
+.class-chip {
+  padding: 2px 8px;
+  border-radius: 999px;
+  background-color: alpha(currentColor, 0.07);
+  font-size: 0.9em;
+}
+
+.stat-card { padding: 14px 16px; }
+.stat-tile { padding: 12px 14px; }
+.stat-value {
+  font-size: 1.7em;
+  font-weight: 800;
+  font-feature-settings: "tnum";
+}
+.stat-value.win, label.win { color: #2f8556; }
+.stat-value.loss, label.loss { color: #c4453a; }
+.stat-value.draw { color: alpha(currentColor, 0.65); }
+
+progressbar.progress-bar-wide trough,
+progressbar.progress-bar-wide progress { min-height: 10px; border-radius: 5px; }
+
+.insight {
+  padding: 10px 12px;
+  border-radius: 10px;
+  background-color: alpha(currentColor, 0.045);
+  border-left: 4px solid alpha(currentColor, 0.25);
+}
+.insight-strength { border-left-color: #3f9b6a; }
+.insight-strength .insight-icon { color: #3f9b6a; }
+.insight-weakness { border-left-color: #d9564a; }
+.insight-weakness .insight-icon { color: #d9564a; }
+.insight-improvement { border-left-color: #3584e4; }
+.insight-improvement .insight-icon { color: #3584e4; }
+.insight-note .insight-icon { color: alpha(currentColor, 0.6); }

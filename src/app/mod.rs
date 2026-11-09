@@ -7,6 +7,7 @@ use adw::prelude::*;
 use gtk::{gdk, gio, glib};
 
 use crate::engine::registry::EngineRegistry;
+use crate::history::HistoryStore;
 use crate::settings::SettingsStore;
 use crate::ui::window::MainWindow;
 
@@ -74,10 +75,36 @@ fn present_window(
         paths::engines_file(),
         paths::engines_dir(),
     )));
-    let window = MainWindow::new(application, settings, registry);
+    let (history, history_notice) = open_history();
+    let window = MainWindow::new(application, settings, registry, history);
     window.present();
+    if let Some(notice) = history_notice {
+        window.controller().toast(&notice);
+    }
     if let Some(file) = file {
         window.open_file(&file);
     }
     state.replace(Some(window));
+}
+
+/// Opens the local game-history database, creating it on first launch. If it
+/// cannot be used, the session continues with a temporary in-memory history and
+/// the user is told why; an unreadable file is moved aside, never deleted.
+fn open_history() -> (HistoryStore, Option<String>) {
+    match HistoryStore::open(&paths::history_db_file()) {
+        Ok((store, report)) => {
+            let notice = report.quarantined.map(|path| {
+                format!(
+                    "Your game history file was damaged. It was kept as {} and a new history was started.",
+                    path.display()
+                )
+            });
+            (store, notice)
+        }
+        Err(error) => {
+            eprintln!("knightgambit: game history unavailable: {error}");
+            let store = HistoryStore::in_memory().expect("an in-memory database can always be created");
+            (store, Some(format!("Game history is unavailable this session: {error}")))
+        }
+    }
 }

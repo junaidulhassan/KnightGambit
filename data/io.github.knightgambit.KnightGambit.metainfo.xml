@@ -46,6 +46,12 @@
     <color type="primary" scheme_preference="dark">#1f4a33</color>
   </branding>
   <releases>
+    <release version="1.1.0" date="2026-11-10">
+      <description>
+        <p>Game History: every finished game against the computer is saved to a local database. Browse, search, filter and sort your games, replay them on a board, export PGN and back up the database.</p>
+        <p>Statistics &amp; Analytics: interactive charts for results, openings, engine-verified move quality, and a strengths and weaknesses analysis with recommendations.</p>
+      </description>
+    </release>
     <release version="1.0.4" date="2026-11-07">
       <description>
         <p>Wider sidebar that can be resized by dragging its left edge; the chosen width is remembered.</p>

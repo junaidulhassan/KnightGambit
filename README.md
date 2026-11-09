@@ -62,6 +62,18 @@ implements the complete official rules of chess, and plays against genuine open-
 - **Review**: a SAN move list (standard, figurine or long algebraic), first/previous/next/last navigation,
   captured pieces with material balance, takeback, resign, draw offers, draw claims, and post-game engine
   analysis.
+- **Game History**: every game you finish against the computer is saved automatically to a local SQLite
+  database (created on first launch, kept across restarts and upgrades). Open **Game History** (Ctrl+H) to
+  search, filter (result, color, opponent level, opening, date range) and sort your games, replay any game
+  move by move on a board (with Stockfish move-quality badges for reviewed games), open it on the main board,
+  re-review it, copy or save its PGN, export all or the filtered games as PGN, and back up the database.
+- **Statistics & Analytics**: **Statistics & Analytics** (Ctrl+I) turns your history into charts: results,
+  win-rate trend, streaks, average duration, performance per difficulty and color; opening usage, ECO codes,
+  best and worst openings and trends; move-quality counts, distribution, a phase heatmap, mistake and blunder
+  trends and winning-versus-losing comparison; and a strengths and weaknesses page with a performance radar,
+  recent-form progress bars and actionable, data-driven recommendations. Move-quality figures come only from
+  real Stockfish reviews: a game that was never reviewed contributes nothing to them. Everything is updated as
+  soon as a game ends.
 - **Files**: PGN import and export (including games from custom positions), FEN loading and copying, and
   opening `.pgn` files from the file manager.
 - **Desktop integration**: light, dark and system theme, a resizable sidebar (drag its left edge; the width is
@@ -92,7 +104,7 @@ cargo run --release
 
 ```bash
 make deb
-sudo apt install ./dist/knightgambit_1.0.4_amd64.deb
+sudo apt install ./dist/knightgambit_1.1.0_amd64.deb
 ```
 
 KnightGambit then appears in the GNOME application grid with its icon and desktop entry.
@@ -144,6 +156,7 @@ deletes its files.
 | Open / save PGN | Ctrl+O / Ctrl+S |
 | Copy FEN / copy PGN | Ctrl+Shift+C / Ctrl+Alt+C |
 | Load FEN | Ctrl+L |
+| Game history / statistics | Ctrl+H / Ctrl+I |
 | Engines / preferences | Ctrl+E / Ctrl+, |
 | Shortcuts / quit | Ctrl+? / Ctrl+Q |
 
@@ -169,6 +182,11 @@ The test suites cover:
   cancelled searches, crashes, probing and engine registry persistence.
 - `tests/review_premove.rs`: premove geometry, promotion detection, win-percentage and accuracy formulas,
   sacrifice detection, opening book legality, Book detection and opening names, Elo estimation, and full-game move classification including checkmate, Forced and Miss handling.
+- `tests/history.rs`: first-launch database creation, persistence across reopen, duplicate protection (games
+  are never overwritten), take-back retraction, review storage, PGN export and backup, corruption quarantine,
+  refusal of newer schemas, record building (results, resignation, opening and ECO detection, endgame phase),
+  search, filters and sorting, and every statistic: totals, streaks, trends, opening rankings, per-color and
+  per-level results, move quality (user moves of reviewed games only), phases, progress and insights.
 - `tests/settings.rs`: settings persistence and corruption recovery, board presets, piece rendering coverage
   at several sizes, and texture determinism.
 
@@ -186,7 +204,21 @@ Two developer examples support manual verification:
 - Settings: `~/.config/knightgambit/settings.json`
 - Engine registry: `~/.config/knightgambit/engines.json`
 - Engines and networks: `~/.local/share/knightgambit/engines/`
+- Game history database: `~/.local/share/knightgambit/history.db` (SQLite, WAL mode)
 - Generated sounds: `~/.cache/knightgambit/sounds/`
+
+### Game history database
+
+The database is created automatically the first time KnightGambit starts for each user (a `.deb` installs
+system files only and never touches per-user data, so installing, upgrading or removing the package keeps your
+history). Completed games against the computer are stored with date, color, opponent and difficulty, result and
+ending, opening and ECO code, PGN, move list, duration and time control; Stockfish reviews are stored per move.
+Games are inserted once and never overwritten, the only removal being the automatic withdrawal of a game that
+you resume with a take-back after it ended (it is recorded again when it really finishes). Schema upgrades are
+versioned migrations (`PRAGMA user_version`); a database written by a newer version is left untouched, and a
+damaged file is moved aside (`history.db.corrupt-<time>`) rather than deleted. Games that are unfinished,
+abandoned, practice games, two-player games and imported PGNs are not recorded. To back up your history use
+the menu in **Game History**, or copy `history.db` while the application is closed.
 
 ## Troubleshooting
 

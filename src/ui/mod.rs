@@ -1,5 +1,7 @@
 pub mod art;
+pub mod background;
 pub mod board;
+pub mod charts;
 pub mod controller;
 pub mod dialogs;
 pub mod sound;

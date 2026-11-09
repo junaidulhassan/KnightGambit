@@ -44,6 +44,10 @@ uninstall:
 	rm -f $(ICON_ROOT)/scalable/actions/kg-trophy-symbolic.svg
 	rm -f $(ICON_ROOT)/scalable/actions/kg-checkmate-symbolic.svg
 	rm -f $(ICON_ROOT)/scalable/actions/kg-review-symbolic.svg
+	rm -f $(ICON_ROOT)/scalable/actions/kg-history-symbolic.svg
+	rm -f $(ICON_ROOT)/scalable/actions/kg-stats-symbolic.svg
+	rm -f $(ICON_ROOT)/scalable/actions/kg-book-symbolic.svg
+	rm -f $(ICON_ROOT)/scalable/actions/kg-filter-symbolic.svg
 
 deb:
 	./packaging/build-deb.sh

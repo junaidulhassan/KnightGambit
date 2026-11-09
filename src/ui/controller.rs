@@ -15,7 +15,13 @@ use crate::engine::session::{EngineIdentity, EngineSession, SearchRequest, Sessi
 use crate::engine::strength::{ClockState, StrengthPlan, go_command, plan_strength, position_command};
 use crate::engine::uci::{Score, SearchInfo};
 use crate::engine::session_config;
-use crate::settings::{ColorChoice, GameMode, NewGameSettings, Settings, SettingsStore, StrengthSettings};
+use crate::history::{
+    GameContext, HistoryStore, build_record, new_session_uid, review_rows, review_summary, unix_now,
+};
+use crate::settings::{
+    ColorChoice, Difficulty, GameMode, NewGameSettings, Settings, SettingsStore, StrengthSettings,
+};
+use crate::ui::background::Worker;
 use crate::ui::board::{AnimationHint, BoardAppearance, BoardWidget};
 use crate::ui::sound::{Sound, SoundPlayer};
 use crate::review::{GameReview, MoveClass, PositionEval, classify_game};
@@ -102,8 +108,52 @@ struct ActiveSearch {
     started: Instant,
 }
 
+/// Who the user is playing, captured when a game starts so it can be stored
+/// with the finished game.
+#[derive(Debug, Clone)]
+struct Opponent {
+    name: String,
+    level: String,
+    elo: Option<i64>,
+}
+
+/// Bookkeeping that ties the game on the board to the local game history.
+#[derive(Debug)]
+struct HistorySession {
+    uid: String,
+    started: Instant,
+    user_color: Option<Color>,
+    opponent: Option<Opponent>,
+    /// A record of this play session has been queued or stored.
+    recording: bool,
+    /// Row id of the stored record of this session, once known.
+    record_id: Option<i64>,
+    /// Row id of the stored game that is currently open on the board for review.
+    history_game_id: Option<i64>,
+}
+
+impl HistorySession {
+    fn new() -> Self {
+        Self {
+            uid: new_session_uid(),
+            started: Instant::now(),
+            user_color: None,
+            opponent: None,
+            recording: false,
+            record_id: None,
+            history_game_id: None,
+        }
+    }
+}
+
+type HistoryListener = Box<dyn Fn() -> bool>;
+
 pub struct Controller {
     ui: Ui,
+    history: HistoryStore,
+    worker: Worker,
+    session: RefCell<HistorySession>,
+    history_listeners: RefCell<Vec<HistoryListener>>,
     settings: SettingsStore,
     registry: Rc<RefCell<EngineRegistry>>,
     sounds: SoundPlayer,
@@ -169,9 +219,19 @@ fn today() -> String {
 }
 
 impl Controller {
-    pub fn new(ui: Ui, settings: SettingsStore, registry: Rc<RefCell<EngineRegistry>>, sounds: SoundPlayer) -> Rc<Self> {
+    pub fn new(
+        ui: Ui,
+        settings: SettingsStore,
+        registry: Rc<RefCell<EngineRegistry>>,
+        sounds: SoundPlayer,
+        history: HistoryStore,
+    ) -> Rc<Self> {
         let controller = Rc::new(Self {
             ui,
+            history,
+            worker: Worker::new(),
+            session: RefCell::new(HistorySession::new()),
+            history_listeners: RefCell::new(Vec::new()),
             settings,
             registry,
             sounds,
@@ -447,6 +507,8 @@ impl Controller {
         self.settings.update_silently(|settings| settings.last_game = config.clone());
         self.ui.board.set_flipped(flipped);
 
+        self.begin_history_session(&config, user_color, engine_record.as_ref());
+
         let wants_engine = config.mode == GameMode::VersusEngine;
         if !matches!(config.mode, GameMode::Practice) {
             self.drop_analyzer();
@@ -585,6 +647,7 @@ impl Controller {
         self.stop_review_job();
         self.stop_clock_timer();
         self.drop_engine();
+        self.worker.finish();
     }
 
     fn on_session_event(&self, event: SessionEvent) {
@@ -1067,6 +1130,7 @@ impl Controller {
     }
 
     fn after_move(&self, mv: Move) {
+        self.session.borrow_mut().history_game_id = None;
         self.invalidate_review();
         let ply = self.game.borrow().ply_count();
         self.view_ply.set(ply);
@@ -1166,6 +1230,7 @@ impl Controller {
             self.sounds.play(Sound::GameEnd);
         }
         self.present_result(&result);
+        self.record_completed_game();
         self.refresh_all(None);
         self.schedule_engine();
     }
@@ -1533,6 +1598,10 @@ impl Controller {
         };
         self.cancel_search();
         let was_over = self.game.borrow().is_over();
+        if was_over {
+            self.retract_completed_game();
+        }
+        self.session.borrow_mut().history_game_id = None;
         self.game.borrow_mut().undo_plies(plies);
         let ply = self.game.borrow().ply_count();
         self.view_ply.set(ply);
@@ -1723,6 +1792,226 @@ impl Controller {
 }
 
 impl Controller {
+    pub fn history(&self) -> &HistoryStore {
+        &self.history
+    }
+
+    pub fn worker(&self) -> &Worker {
+        &self.worker
+    }
+
+    /// Registers a callback run whenever the stored history changes (a game was
+    /// recorded or reviewed). The callback returns `false` to unregister itself.
+    pub fn connect_history_changed(&self, callback: impl Fn() -> bool + 'static) {
+        self.history_listeners.borrow_mut().push(Box::new(callback));
+    }
+
+    fn notify_history_changed(&self) {
+        self.history_listeners.borrow_mut().retain(|listener| listener());
+    }
+
+    fn begin_history_session(&self, config: &NewGameSettings, user_color: Color, engine: Option<&EngineRecord>) {
+        let mut session = HistorySession::new();
+        if config.mode == GameMode::VersusEngine
+            && let Some(record) = engine
+        {
+            let strength = config.strength;
+            session.user_color = Some(user_color);
+            session.opponent = Some(Opponent {
+                name: record.version_label(),
+                level: strength.difficulty.label().to_owned(),
+                elo: match strength.difficulty {
+                    Difficulty::Beginner => Some(1350),
+                    Difficulty::Intermediate => Some(1800),
+                    Difficulty::Advanced => Some(2300),
+                    Difficulty::Maximum => None,
+                    Difficulty::Custom => Some(i64::from(strength.custom_elo)),
+                },
+            });
+        }
+        self.session.replace(session);
+    }
+
+    /// Stores the finished game in the local history. Only games played against
+    /// the computer are recorded. The write happens on the worker thread.
+    fn record_completed_game(&self) {
+        let context = {
+            let mut session = self.session.borrow_mut();
+            let (Some(user_color), Some(opponent)) = (session.user_color, session.opponent.clone()) else {
+                return;
+            };
+            if session.recording {
+                return;
+            }
+            let context = GameContext {
+                uid: session.uid.clone(),
+                user_color,
+                opponent_name: opponent.name,
+                opponent_level: opponent.level,
+                opponent_elo: opponent.elo,
+                duration_secs: session.started.elapsed().as_secs() as i64,
+                played_at: unix_now(),
+            };
+            let record = build_record(&self.game.borrow(), &self.headers.borrow(), &context);
+            let Some(record) = record else { return };
+            session.recording = true;
+            (record, context.uid)
+        };
+        let (record, uid) = context;
+        let store = self.history.clone();
+        let weak = self.weak();
+        self.worker.run(
+            move || {
+                let inserted = store.insert_game(&record)?;
+                match inserted {
+                    Some(id) => Ok(Some(id)),
+                    None => store.game_id_for_uid(&record.uid),
+                }
+            },
+            move |result: Result<Option<i64>, crate::history::HistoryError>| {
+                let Some(controller) = weak.upgrade() else { return };
+                match result {
+                    Ok(id) => {
+                        {
+                            let mut session = controller.session.borrow_mut();
+                            if session.uid == uid {
+                                session.record_id = id;
+                            }
+                        }
+                        controller.notify_history_changed();
+                    }
+                    Err(error) => {
+                        controller.toast(&format!("Could not save the game to your history: {error}"));
+                        let mut session = controller.session.borrow_mut();
+                        if session.uid == uid {
+                            session.recording = false;
+                        }
+                    }
+                }
+            },
+        );
+    }
+
+    /// A take-back after the game ended resumes it, so its record no longer
+    /// describes a completed game and is withdrawn; it is recorded again when
+    /// the game finishes for real.
+    fn retract_completed_game(&self) {
+        let uid = {
+            let mut session = self.session.borrow_mut();
+            if !session.recording {
+                return;
+            }
+            session.recording = false;
+            session.record_id = None;
+            session.uid.clone()
+        };
+        let store = self.history.clone();
+        let weak = self.weak();
+        self.worker.run(
+            move || store.retract_session(&uid),
+            move |result| {
+                if let Some(controller) = weak.upgrade() {
+                    if let Err(error) = result {
+                        controller.toast(&format!("Could not update your history: {error}"));
+                    }
+                    controller.notify_history_changed();
+                }
+            },
+        );
+        self.session.borrow_mut().uid = new_session_uid();
+    }
+
+    /// Saves a finished engine review for the stored game it belongs to.
+    fn save_review_to_history(&self, review: &GameReview, engine: &str, movetime: u64) {
+        let target = {
+            let session = self.session.borrow();
+            session.record_id.or(session.history_game_id)
+        };
+        let Some(game_id) = target else { return };
+        if review.moves.len() != self.game.borrow().ply_count() {
+            return;
+        }
+        let rows = review_rows(game_id, review);
+        let summary = review_summary(review, engine, movetime, unix_now());
+        let store = self.history.clone();
+        let weak = self.weak();
+        self.worker.run(
+            move || store.save_review(game_id, &summary, &rows),
+            move |result| {
+                if let Some(controller) = weak.upgrade() {
+                    match result {
+                        Ok(()) => {
+                            controller.toast("Review saved to your game history");
+                            controller.notify_history_changed();
+                        }
+                        Err(error) => controller.toast(&format!("Could not save the review: {error}")),
+                    }
+                }
+            },
+        );
+    }
+
+    /// Opens a stored game on the main board (as a practice game) and optionally
+    /// starts an engine review whose result is saved back to the history.
+    pub fn open_history_game(&self, game_id: i64, review: bool) {
+        let store = self.history.clone();
+        let weak = self.weak();
+        self.worker.run(
+            move || store.get_game(game_id),
+            move |result| {
+                let Some(controller) = weak.upgrade() else { return };
+                match result {
+                    Ok(Some(record)) => controller.load_history_record(&record, review),
+                    Ok(None) => controller.toast("That game is no longer in your history"),
+                    Err(error) => controller.toast(&format!("Could not open the game: {error}")),
+                }
+            },
+        );
+    }
+
+    fn load_history_record(&self, record: &crate::history::GameRecord, review: bool) {
+        let parsed = match crate::chess::parse_pgn(&record.pgn) {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                self.toast(&format!("Could not read the stored game: {error}"));
+                return;
+            }
+        };
+        let mut config = self.config();
+        config.mode = GameMode::Practice;
+        config.clock_enabled = false;
+        config.start_fen.clear();
+        self.start_with_game(config, parsed.game, Some(parsed.headers));
+        self.session.borrow_mut().history_game_id = Some(record.id);
+        if review {
+            self.start_review();
+        }
+    }
+
+    pub fn confirm_open_history_game(self: &Rc<Self>, game_id: i64, review: bool) {
+        if !self.has_unfinished_game() {
+            self.open_history_game(game_id, review);
+            return;
+        }
+        let dialog = adw::AlertDialog::new(
+            Some("Leave the current game?"),
+            Some("Opening a game from your history replaces the game in progress, which will not be saved."),
+        );
+        dialog.add_responses(&[("cancel", "Keep Playing"), ("open", "Open Game")]);
+        dialog.set_response_appearance("open", adw::ResponseAppearance::Destructive);
+        dialog.set_default_response(Some("cancel"));
+        dialog.set_close_response("cancel");
+        let weak = self.weak();
+        dialog.connect_response(None, move |_, response| {
+            if response == "open"
+                && let Some(controller) = weak.upgrade()
+            {
+                controller.open_history_game(game_id, review);
+            }
+        });
+        dialog.present(Some(&self.ui.window));
+    }
+
     fn review_active(&self) -> bool {
         self.review.borrow().is_some() || self.review_job.borrow().is_some()
     }
@@ -1939,8 +2228,10 @@ impl Controller {
     fn finish_review(&self) {
         let Some(mut job) = self.review_job.take() else { return };
         job.session.shutdown();
+        let (engine_name, movetime) = (job.engine_name.clone(), job.movetime);
         let evals: Vec<PositionEval> = job.evals.into_iter().flatten().collect();
         let review = classify_game(&self.game.borrow(), &evals);
+        self.save_review_to_history(&review, &engine_name, movetime);
         let blunders = review.counts[0][MoveClass::Blunder.index()] + review.counts[1][MoveClass::Blunder.index()];
         let brilliant = review.counts[0][MoveClass::Brilliant.index()] + review.counts[1][MoveClass::Brilliant.index()];
         self.review.replace(Some(review));
