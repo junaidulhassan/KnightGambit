@@ -33,8 +33,9 @@ Homepage: https://github.com/knightgambit/KnightGambit
 Description: Premium offline chess for the GNOME desktop
  KnightGambit is a GTK4 and libadwaita chess application with original
  Staunton-inspired vector pieces, complete chess rules, chess clocks,
- move review, a searchable game history with board replay, performance
- statistics and analytics, PGN and FEN support, and integration with the
+ move review with live move feedback and an evaluation bar, an analysis
+ line for trying your own moves, arrow drawing, a searchable game history
+ with board replay, performance statistics and analytics, PGN and FEN support, and integration with the
  open-source UCI engines Stockfish, Berserk, Ethereal, Koivisto and Leela
  Chess Zero.
 CONTROL

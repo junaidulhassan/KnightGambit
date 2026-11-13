@@ -4,6 +4,7 @@ use shakmaty::{Color, Role};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum PieceStyle {
     #[default]
+    Staunton,
     ForestWood,
     WalnutMaple,
     ClassicFlat,
@@ -11,7 +12,8 @@ pub enum PieceStyle {
 }
 
 impl PieceStyle {
-    pub const ALL: [PieceStyle; 4] = [
+    pub const ALL: [PieceStyle; 5] = [
+        PieceStyle::Staunton,
         PieceStyle::ForestWood,
         PieceStyle::WalnutMaple,
         PieceStyle::ClassicFlat,
@@ -20,6 +22,7 @@ impl PieceStyle {
 
     pub fn label(self) -> &'static str {
         match self {
+            PieceStyle::Staunton => "Classic Staunton",
             PieceStyle::ForestWood => "Ivory & Charcoal Wood",
             PieceStyle::WalnutMaple => "Walnut & Maple",
             PieceStyle::ClassicFlat => "Classic Flat",
@@ -85,7 +88,7 @@ fn palette(style: PieceStyle, color: Color) -> Palette {
             grain: None,
             sheen: None,
         },
-        (PieceStyle::Custom, color) => palette(PieceStyle::ForestWood, color),
+        (PieceStyle::Custom | PieceStyle::Staunton, color) => palette(PieceStyle::ForestWood, color),
         (PieceStyle::ClassicFlat, Color::Black) => Palette {
             light: "#4a4a4a",
             mid: "#3a3a3a",
@@ -153,6 +156,24 @@ const KING: &[Part] = &[
     part(BASE_SLAB),
 ];
 
+/// The standard Staunton diagram set by Colin M.L. Burnett (GPL-2.0-or-later).
+fn staunton_svg(role: Role, color: Color) -> &'static str {
+    match (color, role) {
+        (Color::White, Role::King) => include_str!("../../assets/pieces/staunton/wK.svg"),
+        (Color::White, Role::Queen) => include_str!("../../assets/pieces/staunton/wQ.svg"),
+        (Color::White, Role::Rook) => include_str!("../../assets/pieces/staunton/wR.svg"),
+        (Color::White, Role::Bishop) => include_str!("../../assets/pieces/staunton/wB.svg"),
+        (Color::White, Role::Knight) => include_str!("../../assets/pieces/staunton/wN.svg"),
+        (Color::White, Role::Pawn) => include_str!("../../assets/pieces/staunton/wP.svg"),
+        (Color::Black, Role::King) => include_str!("../../assets/pieces/staunton/bK.svg"),
+        (Color::Black, Role::Queen) => include_str!("../../assets/pieces/staunton/bQ.svg"),
+        (Color::Black, Role::Rook) => include_str!("../../assets/pieces/staunton/bR.svg"),
+        (Color::Black, Role::Bishop) => include_str!("../../assets/pieces/staunton/bB.svg"),
+        (Color::Black, Role::Knight) => include_str!("../../assets/pieces/staunton/bN.svg"),
+        (Color::Black, Role::Pawn) => include_str!("../../assets/pieces/staunton/bP.svg"),
+    }
+}
+
 fn parts(role: Role) -> &'static [Part] {
     match role {
         Role::Pawn => PAWN,
@@ -195,6 +216,9 @@ pub fn piece_svg(role: Role, color: Color, style: PieceStyle) -> String {
         && let Some(svg) = super::custom::custom_svg(role, color)
     {
         return svg;
+    }
+    if style == PieceStyle::Staunton {
+        return staunton_svg(role, color).to_owned();
     }
     let palette = palette(style, color);
     let mut svg = String::with_capacity(4096);

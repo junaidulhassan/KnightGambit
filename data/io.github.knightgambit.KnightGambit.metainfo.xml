@@ -46,6 +46,13 @@
     <color type="primary" scheme_preference="dark">#1f4a33</color>
   </branding>
   <releases>
+    <release version="1.2.0" date="2026-11-10">
+      <description>
+        <p>Move feedback: Stockfish can rate each move you play as brilliant, best, inaccuracy, mistake or blunder as you play.</p>
+        <p>Evaluation bar beside the board, and an analysis line: make your own moves after a game or during its review, with live feedback, without touching the real game.</p>
+        <p>Arrow tool: draw arrows and mark squares with the right mouse button; knight moves are drawn as an L.</p>
+      </description>
+    </release>
     <release version="1.1.0" date="2026-11-10">
       <description>
         <p>Game History: every finished game against the computer is saved to a local database. Browse, search, filter and sort your games, replay them on a board, export PGN and back up the database.</p>

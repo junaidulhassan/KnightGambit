@@ -16,6 +16,7 @@ fn main() {
     let style = match args.get(2).map(String::as_str) {
         Some("walnut") => PieceStyle::WalnutMaple,
         Some("flat") => PieceStyle::ClassicFlat,
+        Some("staunton") => PieceStyle::Staunton,
         _ => PieceStyle::ForestWood,
     };
     let square = 150u32;

@@ -1,4 +1,5 @@
 mod animation;
+mod checkmate_animation;
 mod frame;
 mod geometry;
 mod imp;
@@ -57,8 +58,18 @@ impl BoardWidget {
     }
 
     pub fn set_review_marker(&self, marker: Option<(Square, gtk::gdk::Texture)>) {
-        self.imp().state.borrow_mut().marker = marker;
-        self.queue_draw();
+        self.imp().set_marker(marker, None);
+    }
+
+    /// Like [`Self::set_review_marker`], but the move's squares take `color`
+    /// and `label` pops up briefly before the icon appears.
+    pub fn set_accented_marker(&self, marker: Option<(Square, gtk::gdk::Texture)>, label: &str, color: gtk::gdk::RGBA) {
+        self.imp().set_marker(marker, Some(imp::MarkerAccent { label: Some(label.to_owned()), color }));
+    }
+
+    /// Like [`Self::set_review_marker`], but the move's squares take `color`.
+    pub fn set_tinted_marker(&self, marker: Option<(Square, gtk::gdk::Texture)>, color: gtk::gdk::RGBA) {
+        self.imp().set_marker(marker, Some(imp::MarkerAccent { label: None, color }));
     }
 
     pub fn set_arrow(&self, arrow: Option<(Square, Square)>) {
@@ -89,12 +100,12 @@ impl BoardWidget {
             state.check = check;
             state.mate = mate;
             if mate.is_none() {
-                state.mate_pulse = None;
+                state.checkmate = None;
             }
             fresh_mate
         };
-        if start_pulse {
-            self.imp().start_mate_pulse();
+        if let Some(loser) = mate.filter(|_| start_pulse) {
+            self.imp().start_checkmate(loser);
         }
         self.queue_draw();
     }
@@ -116,6 +127,11 @@ impl BoardWidget {
         self.imp().state.borrow_mut().flipped = flipped;
         self.imp().cancel_interaction();
         self.queue_draw();
+    }
+
+    /// Removes all hand-drawn arrows and square marks.
+    pub fn clear_drawings(&self) {
+        self.imp().clear_drawings();
     }
 
     pub fn imp_device_scale(&self) -> f64 {

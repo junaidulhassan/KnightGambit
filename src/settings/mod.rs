@@ -228,6 +228,10 @@ pub struct Settings {
     pub auto_queen: bool,
     pub premoves: bool,
     pub show_analysis: bool,
+    /// Vertical evaluation bar beside the board while analysing.
+    pub show_eval_bar: bool,
+    /// Judge every move (blunder, brilliant, ...) with Stockfish as it is played in practice mode.
+    pub live_feedback: bool,
     pub review_depth: ReviewDepth,
     pub clock_tenths: bool,
     pub low_time_warning_seconds: u64,
@@ -254,7 +258,7 @@ impl Default for Settings {
             light_square: preset.light.to_owned(),
             dark_square: preset.dark.to_owned(),
             board_texture: true,
-            piece_style: PieceStyle::ForestWood,
+            piece_style: PieceStyle::Staunton,
             custom_piece_dir: None,
             coordinates: CoordinateMode::Inside,
             show_legal_moves: true,
@@ -266,6 +270,8 @@ impl Default for Settings {
             auto_queen: false,
             premoves: true,
             show_analysis: true,
+            show_eval_bar: true,
+            live_feedback: false,
             review_depth: ReviewDepth::Standard,
             clock_tenths: true,
             low_time_warning_seconds: 20,

@@ -155,6 +155,44 @@ fn run_step(window: &MainWindow, shadow: &RefCell<Game>, step: &str, store: &kni
             }
         }
         "snap" => save_window(window.window(), argument),
+        "rdrag" => {
+            // rdrag:g1-f3[:shift|ctrl|alt] draws an arrow with the right mouse button.
+            let mut parts = argument.split(':');
+            let (from, to) = parts.next().and_then(|squares| squares.split_once('-')).expect("from-to squares");
+            let modifier = parts.next().unwrap_or("");
+            let board = controller.ui().board.clone();
+            let center = |name: &str| -> (f64, f64) {
+                let square: shakmaty::Square = name.parse().expect("square name");
+                let width = board.width() as f64;
+                let height = board.height() as f64;
+                let available = width.min(height);
+                let frame = (available * 0.012).round();
+                let side = ((available - frame * 2.0) / 8.0).floor() * 8.0;
+                let cell = side / 8.0;
+                let outer = side + frame * 2.0;
+                let origin_x = ((width - outer) / 2.0).round() + frame;
+                let origin_y = ((height - outer) / 2.0).round() + frame;
+                let file = u32::from(square.file()) as f64;
+                let rank = u32::from(square.rank()) as f64;
+                let (column, row) = if board.is_flipped() { (7.0 - file, rank) } else { (file, 7.0 - rank) };
+                (origin_x + (column + 0.5) * cell, origin_y + (row + 0.5) * cell)
+            };
+            let (x0, y0) = center(from);
+            let (x1, y1) = center(to);
+            let controllers = board.observe_controllers();
+            for index in 0..controllers.n_items() {
+                if let Some(drag) = controllers.item(index).and_downcast::<gtk::GestureDrag>()
+                    && drag.button() == gtk::gdk::BUTTON_SECONDARY
+                {
+                    let _ = modifier;
+                    drag.emit_by_name::<()>("drag-begin", &[&x0, &y0]);
+                    drag.emit_by_name::<()>("drag-update", &[&(x1 - x0), &(y1 - y0)]);
+                    drag.emit_by_name::<()>("drag-end", &[&(x1 - x0), &(y1 - y0)]);
+                }
+            }
+        }
+        "back" => controller.end_exploration(),
+        "goto" => controller.go_to_ply(argument.parse().unwrap_or(0)),
         "moves" => {
             for san in argument.split_whitespace() {
                 if let Ok(live) = Game::from_fen(&controller.fen_text()) {

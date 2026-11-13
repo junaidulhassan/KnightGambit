@@ -1,3 +1,4 @@
+mod arrows;
 mod game;
 mod material;
 mod notation;
@@ -5,6 +6,7 @@ mod outcome;
 mod pgn;
 mod premove;
 
+pub use arrows::{Drawings, DrawColor, UserArrow, knight_elbow};
 pub use game::{Game, GameSetupError, PlayedMove};
 pub use material::{CapturedPieces, material_balance};
 pub use notation::{NotationStyle, format_san};

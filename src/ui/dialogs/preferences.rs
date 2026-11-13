@@ -466,6 +466,20 @@ pub fn present(controller: &Rc<Controller>) {
     defaults_group.add(&default_row);
     defaults_group.add(&difficulty_row);
     defaults_group.add(&analysis_row);
+    let eval_bar_row = switch(
+        "Show evaluation bar",
+        Some("A bar beside the board that follows the engine's evaluation of every position you set up"),
+        settings.show_eval_bar,
+    );
+    bind_switch(&eval_bar_row, &store, |s, v| s.show_eval_bar = v);
+    defaults_group.add(&eval_bar_row);
+    let feedback_row = switch(
+        "Judge my moves as I play (practice mode)",
+        Some("Stockfish rates each move as brilliant, best, inaccuracy, mistake, blunder and so on right after you play it"),
+        settings.live_feedback,
+    );
+    bind_switch(&feedback_row, &store, |s, v| s.live_feedback = v);
+    defaults_group.add(&feedback_row);
     let depth_names: Vec<&str> = crate::settings::ReviewDepth::ALL.iter().map(|d| d.label()).collect();
     let depth_row = combo(
         "Game review depth",

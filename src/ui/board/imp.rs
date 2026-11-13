@@ -8,9 +8,10 @@ use gtk::{gdk, glib, graphene, gsk, pango};
 use shakmaty::{Board, Chess, Color, Move, Piece, Position, Role, Square};
 
 use super::animation::{MoveAnimation, Pulse, SlidingPiece, ease_out_back, ease_out_cubic};
+use super::checkmate_animation::{CheckmateAnimation, CheckmateConfig, ease_in_cubic};
 use super::geometry::BoardGeometry;
 use crate::assets::{PieceStyle, leather_texture_rgba, render_piece_rgba};
-use crate::chess::{Game, is_promotion_square, premove_destinations};
+use crate::chess::{DrawColor, Drawings, Game, UserArrow, is_promotion_square, knight_elbow, premove_destinations};
 use crate::settings::{CoordinateMode, Rgba};
 use crate::ui::art::{ROLES, texture_from_rgba};
 
@@ -38,7 +39,7 @@ impl Default for BoardAppearance {
             light: Rgba::rgb(0xec, 0xec, 0xe9),
             dark: Rgba::rgb(0x36, 0x69, 0x4d),
             texture: true,
-            style: PieceStyle::ForestWood,
+            style: PieceStyle::Staunton,
             coordinates: CoordinateMode::Inside,
             show_legal: true,
             highlight_last: true,
@@ -71,6 +72,20 @@ pub enum AnimationHint {
     Backward(Move),
 }
 
+/// Extra emphasis for a standout move: its squares take the class color and
+/// a small label pops up before the class icon appears.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MarkerAccent {
+    pub label: Option<String>,
+    pub color: gdk::RGBA,
+}
+
+/// How long the label stays fully visible, and how long it takes to fade
+/// into the class icon.
+const ACCENT_HOLD_MS: f64 = 1000.0;
+const ACCENT_FADE_MS: f64 = 300.0;
+const ACCENT_POP_MS: f64 = 160.0;
+
 #[derive(Default)]
 pub struct BoardState {
     pub position: Chess,
@@ -85,14 +100,19 @@ pub struct BoardState {
     pub promotion: Option<PromotionPicker>,
     pub animation: Option<MoveAnimation>,
     pub select_pulse: Option<Pulse>,
-    pub mate_pulse: Option<Pulse>,
+    pub checkmate: Option<CheckmateAnimation>,
     pub flipped: bool,
     pub appearance: BoardAppearance,
     pub suppress_next_slide: bool,
     pub premove_color: Option<Color>,
     pub premove: Option<(Square, Square, Option<Role>)>,
     pub marker: Option<(Square, gdk::Texture)>,
+    pub accent: Option<MarkerAccent>,
+    pub accent_pulse: Option<Pulse>,
     pub arrow: Option<(Square, Square)>,
+    pub drawings: Drawings,
+    /// Arrow being drawn with the right mouse button: start, current square, color.
+    pub draw_preview: Option<(Square, Square, DrawColor)>,
 }
 
 
@@ -115,6 +135,9 @@ pub struct BoardWidget {
     pub on_move: RefCell<Option<MoveCallback>>,
     pub on_premove: RefCell<Option<MoveCallback>>,
     pub geometry: Cell<Option<BoardGeometry>>,
+    pub arrow_start: Cell<Option<Square>>,
+    pub arrow_origin: Cell<(f64, f64)>,
+    pub checkmate_frame: Cell<Option<i64>>,
 }
 
 #[glib::object_subclass]
@@ -174,12 +197,27 @@ impl ObjectImpl for BoardWidget {
         });
         widget.add_controller(drag);
 
-        let secondary = gtk::GestureClick::new();
+        let secondary = gtk::GestureDrag::new();
         secondary.set_button(gdk::BUTTON_SECONDARY);
         let weak = widget.downgrade();
-        secondary.connect_pressed(move |_, _, _, _| {
+        secondary.connect_drag_begin(move |gesture, x, y| {
             if let Some(widget) = weak.upgrade() {
-                widget.imp().cancel_interaction();
+                widget.grab_focus();
+                widget.imp().begin_drawing(x, y, gesture.current_event_state());
+            }
+        });
+        let weak = widget.downgrade();
+        secondary.connect_drag_update(move |gesture, dx, dy| {
+            if let Some(widget) = weak.upgrade() {
+                let (sx, sy) = widget.imp().arrow_origin.get();
+                widget.imp().update_drawing(sx + dx, sy + dy, gesture.current_event_state());
+            }
+        });
+        let weak = widget.downgrade();
+        secondary.connect_drag_end(move |gesture, dx, dy| {
+            if let Some(widget) = weak.upgrade() {
+                let (sx, sy) = widget.imp().arrow_origin.get();
+                widget.imp().finish_drawing(sx + dx, sy + dy, gesture.current_event_state());
             }
         });
         widget.add_controller(secondary);
@@ -198,8 +236,9 @@ impl ObjectImpl for BoardWidget {
         keys.connect_key_pressed(move |_, key, _, _| {
             if key == gdk::Key::Escape
                 && let Some(widget) = weak.upgrade()
-                && widget.imp().has_pending_interaction()
+                && (widget.imp().has_pending_interaction() || widget.imp().has_drawings())
             {
+                widget.imp().clear_drawings();
                 widget.imp().cancel_interaction();
                 return glib::Propagation::Stop;
             }
@@ -263,13 +302,14 @@ impl WidgetImpl for BoardWidget {
         let now = widget.frame_clock().map(|clock| clock.frame_time()).unwrap_or(0);
         self.draw_frame(snapshot, &geometry, &state);
         self.draw_squares(snapshot, &geometry, &state);
-        self.draw_highlights(snapshot, &geometry, &state, now);
+        self.draw_highlights(snapshot, &geometry, &state);
+        self.draw_marks(snapshot, &geometry, &state);
         self.draw_coordinates(snapshot, &geometry, &state);
         self.draw_hints(snapshot, &geometry, &state, now);
         self.draw_pieces(snapshot, &geometry, &state, now);
-        self.draw_arrow(snapshot, &geometry, &state);
-        self.draw_marker(snapshot, &geometry, &state);
-        self.draw_mate_badge(snapshot, &geometry, &state, now);
+        self.draw_arrows(snapshot, &geometry, &state);
+        self.draw_marker(snapshot, &geometry, &state, now);
+        self.draw_checkmate_overlay(snapshot, &geometry, &state);
         self.draw_promotion(snapshot, &geometry, &state);
     }
 }
@@ -418,13 +458,26 @@ impl BoardWidget {
         }
     }
 
-    fn draw_highlights(&self, snapshot: &gtk::Snapshot, geometry: &BoardGeometry, state: &BoardState, now: i64) {
+    fn draw_highlights(&self, snapshot: &gtk::Snapshot, geometry: &BoardGeometry, state: &BoardState) {
         let highlight = gdk::RGBA::new(1.0, 1.0, 53.0 / 255.0, 0.5);
+        let accent = state
+            .marker
+            .as_ref()
+            .zip(state.accent.as_ref())
+            .map(|((square, _), accent)| (*square, accent.color.with_alpha(0.62)));
+        let accent_covers_move =
+            accent.is_some_and(|(square, _)| state.last_move.is_some_and(|(from, to)| from == square || to == square));
         if state.appearance.highlight_last
             && let Some((from, to)) = state.last_move
         {
-            snapshot.append_color(&highlight, &geometry.square_rect(from));
-            snapshot.append_color(&highlight, &geometry.square_rect(to));
+            let color = match accent {
+                Some((_, color)) if accent_covers_move => color,
+                _ => highlight,
+            };
+            snapshot.append_color(&color, &geometry.square_rect(from));
+            snapshot.append_color(&color, &geometry.square_rect(to));
+        } else if let Some((square, color)) = accent {
+            snapshot.append_color(&color, &geometry.square_rect(square));
         }
         if let Some((from, to, _)) = state.premove {
             let premove = gdk::RGBA::new(0.86, 0.30, 0.24, 0.55);
@@ -458,11 +511,11 @@ impl BoardWidget {
                 &stops,
             );
         }
-        if let Some(square) = state.mate {
-            let rect = geometry.square_rect(square);
-            let progress = state.mate_pulse.map(|pulse| pulse.progress(now)).unwrap_or(1.0);
-            let alpha = 0.35 + 0.5 * ease_out_cubic(progress);
-            snapshot.append_color(&gdk::RGBA::new(0.86, 0.12, 0.12, alpha as f32), &rect);
+        if let Some(checkmate) = state.checkmate.as_ref() {
+            let red = gdk::RGBA::new(0.878, 0.294, 0.294, checkmate.red_alpha() as f32);
+            let green = gdk::RGBA::new(0.369, 0.620, 0.310, checkmate.green_alpha() as f32);
+            snapshot.append_color(&red, &geometry.square_rect(checkmate.loser()));
+            snapshot.append_color(&green, &geometry.square_rect(checkmate.winner()));
         }
         if let Some(drag) = state.drag.filter(|drag| drag.active)
             && let Some(hover) = state.hover
@@ -655,7 +708,12 @@ impl BoardWidget {
             {
                 continue;
             }
-            self.append_piece(snapshot, piece, &geometry.square_rect(square), 1.0);
+            let scale = state
+                .checkmate
+                .as_ref()
+                .filter(|checkmate| checkmate.loser() == square)
+                .map_or(1.0, |checkmate| checkmate.king_scale() as f32);
+            self.append_piece(snapshot, piece, &geometry.square_rect(square), scale);
         }
         if let Some(animation) = animation {
             let eased = ease_out_cubic(animation.progress(now)) as f32;
@@ -681,62 +739,201 @@ impl BoardWidget {
         }
     }
 
-    fn draw_arrow(&self, snapshot: &gtk::Snapshot, geometry: &BoardGeometry, state: &BoardState) {
-        let Some((from, to)) = state.arrow else { return };
+    fn draw_arrows(&self, snapshot: &gtk::Snapshot, geometry: &BoardGeometry, state: &BoardState) {
+        if let Some((from, to)) = state.arrow {
+            self.draw_arrow_shape(snapshot, geometry, from, to, gdk::RGBA::new(0.0, 0.72, 0.94, 0.8));
+        }
+        for arrow in &state.drawings.arrows {
+            let (r, g, b, a) = arrow.color.rgba();
+            self.draw_arrow_shape(snapshot, geometry, arrow.from, arrow.to, gdk::RGBA::new(r, g, b, a));
+        }
+        if let Some((from, to, color)) = state.draw_preview
+            && from != to
+        {
+            let (r, g, b, a) = color.rgba();
+            self.draw_arrow_shape(snapshot, geometry, from, to, gdk::RGBA::new(r, g, b, a * 0.6));
+        }
+    }
+
+    /// Draws an arrow between two squares as one flat shape: a square-cut
+    /// tail that starts clear of the piece, a straight shaft and a triangular
+    /// head whose tip sits on the centre of the target square. Knight moves
+    /// are drawn as an "L": the long leg first, then a sharp turn.
+    fn draw_arrow_shape(&self, snapshot: &gtk::Snapshot, geometry: &BoardGeometry, from: Square, to: Square, color: gdk::RGBA) {
         if from == to {
             return;
         }
-        let a = geometry.square_rect(from);
-        let b = geometry.square_rect(to);
-        let (ax, ay) = (a.x() + a.width() / 2.0, a.y() + a.height() / 2.0);
-        let (bx, by) = (b.x() + b.width() / 2.0, b.y() + b.height() / 2.0);
-        let (dx, dy) = (bx - ax, by - ay);
-        let length = (dx * dx + dy * dy).sqrt();
-        let (ux, uy) = (dx / length, dy / length);
-        let (px, py) = (-uy, ux);
+        let center = |square: Square| {
+            let rect = geometry.square_rect(square);
+            (rect.x() + rect.width() / 2.0, rect.y() + rect.height() / 2.0)
+        };
+        let unit = |from: (f32, f32), to: (f32, f32)| {
+            let (dx, dy) = (to.0 - from.0, to.1 - from.1);
+            let length = (dx * dx + dy * dy).sqrt().max(1.0);
+            (dx / length, dy / length)
+        };
         let square = geometry.square;
-        let shaft = square * 0.17;
-        let head_width = square * 0.46;
-        let head_length = (square * 0.42).min(length * 0.6);
-        let start = (ax + ux * square * 0.22, ay + uy * square * 0.22);
-        let tip = (bx - ux * square * 0.06, by - uy * square * 0.06);
-        let neck = (tip.0 - ux * head_length, tip.1 - uy * head_length);
+        let half_shaft = square * 0.11;
+        let half_head = square * 0.26;
+        let head_length = square * 0.36;
+        let tail_gap = square * 0.36;
+
+        let a = center(from);
+        let tip = center(to);
+        let corner = knight_elbow(from, to).map(center);
+        // Direction of the first leg and of the leg that carries the head.
+        let first = unit(a, corner.unwrap_or(tip));
+        let last = unit(corner.unwrap_or(a), tip);
+        let start = (a.0 + first.0 * tail_gap, a.1 + first.1 * tail_gap);
+        let neck = (tip.0 - last.0 * head_length, tip.1 - last.1 * head_length);
+        let first_normal = (-first.1, first.0);
+        let last_normal = (-last.1, last.0);
+        let offset = |point: (f32, f32), normal: (f32, f32), distance: f32| {
+            (point.0 + normal.0 * distance, point.1 + normal.1 * distance)
+        };
+        // Where the two shaft edges meet at the turn of an "L".
+        let miter = corner.map(|corner| {
+            let dot = first_normal.0 * last_normal.0 + first_normal.1 * last_normal.1;
+            let scale = half_shaft / (1.0 + dot).max(0.2);
+            let shift = ((first_normal.0 + last_normal.0) * scale, (first_normal.1 + last_normal.1) * scale);
+            ((corner.0 + shift.0, corner.1 + shift.1), (corner.0 - shift.0, corner.1 - shift.1))
+        });
+
+        let mut outline = vec![offset(start, first_normal, half_shaft)];
+        outline.extend(miter.map(|(left, _)| left));
+        outline.push(offset(neck, last_normal, half_shaft));
+        outline.push(offset(neck, last_normal, half_head));
+        outline.push(tip);
+        outline.push(offset(neck, last_normal, -half_head));
+        outline.push(offset(neck, last_normal, -half_shaft));
+        outline.extend(miter.map(|(_, right)| right));
+        outline.push(offset(start, first_normal, -half_shaft));
+
         let builder = gsk::PathBuilder::new();
-        builder.move_to(start.0 + px * shaft / 2.0, start.1 + py * shaft / 2.0);
-        builder.line_to(neck.0 + px * shaft / 2.0, neck.1 + py * shaft / 2.0);
-        builder.line_to(neck.0 + px * head_width / 2.0, neck.1 + py * head_width / 2.0);
-        builder.line_to(tip.0, tip.1);
-        builder.line_to(neck.0 - px * head_width / 2.0, neck.1 - py * head_width / 2.0);
-        builder.line_to(neck.0 - px * shaft / 2.0, neck.1 - py * shaft / 2.0);
-        builder.line_to(start.0 - px * shaft / 2.0, start.1 - py * shaft / 2.0);
+        builder.move_to(outline[0].0, outline[0].1);
+        for point in &outline[1..] {
+            builder.line_to(point.0, point.1);
+        }
         builder.close();
-        let path = builder.to_path();
-        snapshot.append_fill(&path, gsk::FillRule::Winding, &gdk::RGBA::new(0.25, 0.69, 0.96, 0.92));
+        snapshot.append_fill(&builder.to_path(), gsk::FillRule::Winding, &color);
     }
 
-    fn draw_marker(&self, snapshot: &gtk::Snapshot, geometry: &BoardGeometry, state: &BoardState) {
+    fn draw_marks(&self, snapshot: &gtk::Snapshot, geometry: &BoardGeometry, state: &BoardState) {
+        for (square, color) in &state.drawings.marks {
+            let rect = geometry.square_rect(*square);
+            let inset = geometry.square * 0.05;
+            let ring = graphene::Rect::new(
+                rect.x() + inset,
+                rect.y() + inset,
+                rect.width() - inset * 2.0,
+                rect.height() - inset * 2.0,
+            );
+            let rounded = gsk::RoundedRect::from_rect(ring, ring.width() / 2.0);
+            let (r, g, b, a) = color.rgba();
+            let tint = gdk::RGBA::new(r, g, b, a);
+            snapshot.append_border(&rounded, &[(geometry.square * 0.07).max(2.0); 4], &[tint; 4]);
+        }
+    }
+
+    fn draw_marker(&self, snapshot: &gtk::Snapshot, geometry: &BoardGeometry, state: &BoardState, now: i64) {
         let Some((square, texture)) = state.marker.as_ref() else { return };
         let rect = geometry.square_rect(*square);
         let size = geometry.square * 0.38;
         let board = geometry.board_rect();
         let x = (rect.x() + rect.width() - size * 0.72).min(board.x() + board.width() - size);
         let y = (rect.y() - size * 0.28).max(board.y());
-        snapshot.append_texture(texture, &graphene::Rect::new(x, y, size, size));
-    }
-
-    fn draw_mate_badge(&self, snapshot: &gtk::Snapshot, geometry: &BoardGeometry, state: &BoardState, now: i64) {
-        let Some(square) = state.mate else { return };
-        let rect = geometry.square_rect(square);
-        let progress = state.mate_pulse.map(|pulse| pulse.progress(now)).unwrap_or(1.0);
-        let pop = ease_out_back(progress) as f32;
+        let icon = graphene::Rect::new(x, y, size, size);
+        let popup = state
+            .accent
+            .as_ref()
+            .and_then(|accent| accent.label.as_deref().map(|label| (accent, label)))
+            .zip(state.accent_pulse);
+        let Some(((accent, label), pulse)) = popup else {
+            snapshot.append_texture(texture, &icon);
+            return;
+        };
+        let elapsed = (now - pulse.start_us) as f64 / 1000.0;
+        let fade = ((elapsed - ACCENT_HOLD_MS) / ACCENT_FADE_MS).clamp(0.0, 1.0);
+        if fade > 0.0 {
+            let grown = size * ease_out_back(fade) as f32;
+            let inset = (size - grown) / 2.0;
+            snapshot.push_opacity(fade);
+            snapshot.append_texture(texture, &graphene::Rect::new(x + inset, y + inset, grown, grown));
+            snapshot.pop();
+        }
+        if fade >= 1.0 {
+            return;
+        }
+        let pop = (ease_out_back(elapsed / ACCENT_POP_MS) * (1.0 - ease_in_cubic(fade))) as f32;
         if pop <= 0.01 {
             return;
         }
-        let diameter = geometry.square * 0.42 * pop;
-        let center_x = rect.x() + rect.width() * 0.86;
-        let center_y = rect.y() + rect.height() * 0.14;
-        let badge = graphene::Rect::new(center_x - diameter / 2.0, center_y - diameter / 2.0, diameter, diameter);
-        let rounded = gsk::RoundedRect::from_rect(badge, diameter / 2.0);
+        let layout = self.coordinate_layout(&format!("{label}!"), geometry.square * 0.24);
+        let mut description = layout.font_description().unwrap_or_default();
+        description.set_weight(pango::Weight::Bold);
+        layout.set_font_description(Some(&description));
+        let (text_width, text_height) = layout.pixel_size();
+        let (text_width, text_height) = (text_width as f32, text_height as f32);
+        let pad_x = geometry.square * 0.1;
+        let pad_y = geometry.square * 0.045;
+        let (width, height) = (text_width + pad_x * 2.0, text_height + pad_y * 2.0);
+        let left = (rect.x() + rect.width() * 0.5 - width * 0.2)
+            .min(board.x() + board.width() - width)
+            .max(board.x());
+        let top = (rect.y() - height * 0.55).max(board.y());
+        let center = graphene::Point::new(left + width / 2.0, top + height / 2.0);
+        snapshot.push_opacity(1.0 - fade);
+        snapshot.save();
+        snapshot.translate(&center);
+        snapshot.scale(pop, pop);
+        snapshot.translate(&graphene::Point::new(-center.x(), -center.y()));
+        let bubble = graphene::Rect::new(left, top, width, height);
+        let rounded = gsk::RoundedRect::from_rect(bubble, height * 0.28);
+        snapshot.append_outset_shadow(
+            &rounded,
+            &gdk::RGBA::new(0.0, 0.0, 0.0, 0.35),
+            0.0,
+            height * 0.08,
+            0.0,
+            height * 0.28,
+        );
+        snapshot.push_rounded_clip(&rounded);
+        snapshot.append_color(&gdk::RGBA::new(1.0, 1.0, 1.0, 1.0), &bubble);
+        snapshot.pop();
+        self.draw_text(snapshot, &layout, left + pad_x, top + pad_y, accent.color);
+        snapshot.restore();
+        snapshot.pop();
+    }
+
+    /// Sets the class icon for a square, optionally with an accent. The
+    /// label animation only restarts when the accented move changes.
+    pub fn set_marker(&self, marker: Option<(Square, gdk::Texture)>, accent: Option<MarkerAccent>) {
+        // The frame clock only advances while the board is being redrawn, so
+        // its time can be seconds old here and would cut the label short.
+        let now = glib::monotonic_time();
+        let mut state = self.state.borrow_mut();
+        let accent = accent.filter(|_| marker.is_some());
+        let unchanged = accent == state.accent
+            && marker.as_ref().map(|(square, _)| *square) == state.marker.as_ref().map(|(square, _)| *square);
+        state.marker = marker;
+        if !unchanged {
+            state.accent_pulse = accent
+                .as_ref()
+                .filter(|accent| accent.label.is_some())
+                .map(|_| Pulse::new(now, (ACCENT_HOLD_MS + ACCENT_FADE_MS) as i64));
+            state.accent = accent;
+        }
+        let animate = state.accent_pulse.is_some();
+        drop(state);
+        if animate {
+            self.ensure_ticking();
+        }
+        self.obj().queue_draw();
+    }
+
+    fn draw_badge_disc(&self, snapshot: &gtk::Snapshot, center: (f32, f32), diameter: f32, fill: gdk::RGBA) {
+        let disc = graphene::Rect::new(center.0 - diameter / 2.0, center.1 - diameter / 2.0, diameter, diameter);
+        let rounded = gsk::RoundedRect::from_rect(disc, diameter / 2.0);
         snapshot.append_outset_shadow(
             &rounded,
             &gdk::RGBA::new(0.0, 0.0, 0.0, 0.35),
@@ -746,25 +943,61 @@ impl BoardWidget {
             diameter * 0.18,
         );
         snapshot.push_rounded_clip(&rounded);
-        snapshot.append_color(&gdk::RGBA::new(0.80, 0.10, 0.10, 1.0), &badge);
+        snapshot.append_color(&fill, &disc);
         snapshot.pop();
         snapshot.append_border(
             &rounded,
             &[(diameter * 0.07).max(1.0); 4],
             &[gdk::RGBA::new(1.0, 1.0, 1.0, 0.95); 4],
         );
-        let layout = self.coordinate_layout("#", diameter * 0.62);
-        let mut description = layout.font_description().unwrap_or_default();
-        description.set_weight(pango::Weight::Heavy);
-        layout.set_font_description(Some(&description));
-        let (text_width, text_height) = layout.pixel_size();
-        self.draw_text(
-            snapshot,
-            &layout,
-            center_x - text_width as f32 / 2.0,
-            center_y - text_height as f32 / 2.0,
-            gdk::RGBA::new(1.0, 1.0, 1.0, 1.0),
-        );
+    }
+
+    fn draw_checkmate_overlay(&self, snapshot: &gtk::Snapshot, geometry: &BoardGeometry, state: &BoardState) {
+        let Some(checkmate) = state.checkmate.as_ref() else { return };
+        let white = gdk::RGBA::new(1.0, 1.0, 1.0, 1.0);
+        let board = geometry.board_rect();
+        let full = geometry.square * 0.38;
+        let corner = |square: Square| {
+            let rect = geometry.square_rect(square);
+            (
+                (rect.x() + rect.width() - full * 0.22).min(board.x() + board.width() - full / 2.0),
+                (rect.y() + full * 0.22).max(board.y() + full / 2.0),
+            )
+        };
+        let diameter = full * checkmate.badge_scale() as f32;
+        let badge_alpha = checkmate.badge_alpha();
+        if diameter > 0.5 && badge_alpha > 0.0 {
+            snapshot.push_opacity(badge_alpha);
+            let marker = corner(checkmate.loser());
+            self.draw_badge_disc(snapshot, marker, diameter, gdk::RGBA::new(0.84, 0.16, 0.16, 1.0));
+            let hash = gsk::PathBuilder::new();
+            let (reach, gap, lean) = (diameter * 0.24, diameter * 0.1, diameter * 0.05);
+            for side in [-1.0f32, 1.0] {
+                hash.move_to(marker.0 + side * gap + lean, marker.1 - reach);
+                hash.line_to(marker.0 + side * gap - lean, marker.1 + reach);
+                hash.move_to(marker.0 - reach, marker.1 + side * gap);
+                hash.line_to(marker.0 + reach, marker.1 + side * gap);
+            }
+            let stroke = gsk::Stroke::new((diameter * 0.09).max(1.2));
+            stroke.set_line_cap(gsk::LineCap::Round);
+            snapshot.append_stroke(&hash.to_path(), &stroke, &white);
+            let star_center = corner(checkmate.winner());
+            self.draw_badge_disc(snapshot, star_center, diameter, gdk::RGBA::new(0.369, 0.620, 0.310, 1.0));
+            let star = gsk::PathBuilder::new();
+            for point in 0..10 {
+                let radius = if point % 2 == 0 { diameter * 0.32 } else { diameter * 0.13 };
+                let angle = std::f32::consts::PI * (point as f32 / 5.0 - 0.5);
+                let (x, y) = (star_center.0 + radius * angle.cos(), star_center.1 + radius * angle.sin());
+                if point == 0 {
+                    star.move_to(x, y);
+                } else {
+                    star.line_to(x, y);
+                }
+            }
+            star.close();
+            snapshot.append_fill(&star.to_path(), gsk::FillRule::Winding, &white);
+            snapshot.pop();
+        }
     }
 
     pub fn promotion_cells(&self, geometry: &BoardGeometry, picker: &PromotionPicker) -> Vec<(Role, graphene::Rect)> {
@@ -836,10 +1069,25 @@ impl BoardWidget {
             if state.select_pulse.is_some_and(|pulse| pulse.is_finished(now)) {
                 state.select_pulse = None;
             }
-            if state.mate_pulse.is_some_and(|pulse| pulse.is_finished(now)) {
-                state.mate_pulse = None;
+            let elapsed_ms = imp.checkmate_frame.get().map_or(0.0, |last| (now - last) as f64 / 1000.0);
+            let mut checkmate_active = false;
+            if let Some(checkmate) = state.checkmate.as_mut()
+                && !checkmate.is_finished()
+            {
+                checkmate.update(elapsed_ms);
+                checkmate_active = !checkmate.is_finished();
+                if !checkmate_active && !checkmate.config().persist_highlights_until_new_game {
+                    state.checkmate = None;
+                }
             }
-            let active = state.animation.is_some() || state.select_pulse.is_some() || state.mate_pulse.is_some();
+            imp.checkmate_frame.set(checkmate_active.then_some(now));
+            if state.accent_pulse.is_some_and(|pulse| pulse.is_finished(now)) {
+                state.accent_pulse = None;
+            }
+            let active = state.animation.is_some()
+                || state.select_pulse.is_some()
+                || checkmate_active
+                || state.accent_pulse.is_some();
             drop(state);
             widget.queue_draw();
             if active {
@@ -859,10 +1107,22 @@ impl BoardWidget {
             .unwrap_or_else(glib::monotonic_time)
     }
 
-    pub fn start_mate_pulse(&self) {
-        let now = self.now();
-        self.state.borrow_mut().mate_pulse = Some(Pulse::new(now, 900));
-        self.ensure_ticking();
+    pub fn start_checkmate(&self, loser: Square) {
+        let started = {
+            let mut state = self.state.borrow_mut();
+            let board = state.position.board();
+            let winner = state
+                .last_move
+                .map(|(_, to)| to)
+                .filter(|to| *to != loser)
+                .or_else(|| board.color_at(loser).and_then(|color| board.king_of(!color)));
+            state.checkmate = winner.map(|winner| CheckmateAnimation::new(loser, winner, CheckmateConfig::default()));
+            state.checkmate.is_some()
+        };
+        self.checkmate_frame.set(None);
+        if started {
+            self.ensure_ticking();
+        }
     }
 
     fn is_premove_piece(state: &BoardState, square: Square) -> bool {
@@ -989,6 +1249,7 @@ impl BoardWidget {
     }
 
     fn press(&self, x: f64, y: f64) -> bool {
+        self.clear_drawings();
         let Some(geometry) = self.geometry.get() else {
             return false;
         };
@@ -1125,6 +1386,64 @@ impl BoardWidget {
         });
         drop(state);
         self.ensure_ticking();
+    }
+
+    pub fn has_drawings(&self) -> bool {
+        !self.state.borrow().drawings.is_empty()
+    }
+
+    pub fn clear_drawings(&self) {
+        let cleared = self.state.borrow_mut().drawings.clear();
+        if cleared {
+            self.obj().queue_draw();
+        }
+    }
+
+    fn draw_color(modifiers: gdk::ModifierType) -> DrawColor {
+        DrawColor::from_modifiers(
+            modifiers.contains(gdk::ModifierType::SHIFT_MASK),
+            modifiers.contains(gdk::ModifierType::CONTROL_MASK),
+            modifiers.contains(gdk::ModifierType::ALT_MASK),
+        )
+    }
+
+    fn begin_drawing(&self, x: f64, y: f64, modifiers: gdk::ModifierType) {
+        let square = self.geometry.get().and_then(|geometry| geometry.square_at(x, y));
+        self.arrow_origin.set((x, y));
+        self.arrow_start.set(square);
+        if let Some(square) = square {
+            self.state.borrow_mut().draw_preview = Some((square, square, Self::draw_color(modifiers)));
+        }
+    }
+
+    fn update_drawing(&self, x: f64, y: f64, modifiers: gdk::ModifierType) {
+        let Some(start) = self.arrow_start.get() else { return };
+        let current = self.geometry.get().and_then(|geometry| geometry.square_at(x, y)).unwrap_or(start);
+        self.state.borrow_mut().draw_preview = Some((start, current, Self::draw_color(modifiers)));
+        self.obj().queue_draw();
+    }
+
+    /// Finishes a right-button gesture: a drag toggles an arrow, a plain click
+    /// toggles a square mark (or cancels a pending premove or selection).
+    fn finish_drawing(&self, x: f64, y: f64, modifiers: gdk::ModifierType) {
+        let start = self.arrow_start.take();
+        self.state.borrow_mut().draw_preview = None;
+        let Some(start) = start else {
+            self.obj().queue_draw();
+            return;
+        };
+        let end = self.geometry.get().and_then(|geometry| geometry.square_at(x, y)).unwrap_or(start);
+        let color = Self::draw_color(modifiers);
+        if start == end {
+            if self.has_pending_interaction() {
+                self.cancel_interaction();
+            } else {
+                self.state.borrow_mut().drawings.toggle_mark(start, color);
+            }
+        } else {
+            self.state.borrow_mut().drawings.toggle_arrow(UserArrow { from: start, to: end, color });
+        }
+        self.obj().queue_draw();
     }
 
     pub fn cancel_interaction(&self) {
@@ -1272,6 +1591,9 @@ impl BoardWidget {
             }
             _ => None,
         };
+        if state.position != *position {
+            state.drawings.clear();
+        }
         state.position = position.clone();
         state.last_move = last_move;
         state.animation = animation;

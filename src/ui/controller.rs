@@ -24,9 +24,15 @@ use crate::settings::{
 use crate::ui::background::Worker;
 use crate::ui::board::{AnimationHint, BoardAppearance, BoardWidget};
 use crate::ui::sound::{Sound, SoundPlayer};
-use crate::review::{GameReview, MoveClass, PositionEval, classify_game};
+use crate::review::{
+    EvalCache, GameReview, MoveClass, MoveFeedback, PositionEval, bar_label, classify_game, feedback_for_move,
+    is_ready, position_key, white_share,
+};
 use crate::ui::art::review_icon_texture;
-use crate::ui::widgets::{AnalysisPanel, AvatarKind, GameOverCard, MoveList, PlayerBar, ReviewPanel};
+use crate::ui::widgets::{
+    AnalysisPanel, AvatarKind, EvalBar, ExplorationBanner, FeedbackCard, GameOverCard, MoveList, PlayerBar,
+    ReviewPanel,
+};
 
 pub struct Ui {
     pub window: adw::ApplicationWindow,
@@ -51,6 +57,9 @@ pub struct Ui {
     pub game_over: GameOverCard,
     pub review: ReviewPanel,
     pub review_button: gtk::Button,
+    pub eval_bar: EvalBar,
+    pub feedback: FeedbackCard,
+    pub exploration: ExplorationBanner,
 }
 
 struct AnalyzerLink {
@@ -146,6 +155,32 @@ impl HistorySession {
     }
 }
 
+/// The engine's latest evaluation of the position being analysed.
+#[derive(Debug, Clone)]
+struct LiveEval {
+    key: String,
+    depth: u32,
+    eval: PositionEval,
+}
+
+/// A move waiting for the engine to finish thinking about the resulting position.
+#[derive(Debug, Clone)]
+struct PendingFeedback {
+    ply: usize,
+    before_key: String,
+    after_key: String,
+    started: Instant,
+}
+
+/// The real game, set aside while the user explores a variation from it.
+struct Exploration {
+    game: Game,
+    view_ply: usize,
+    review: Option<GameReview>,
+    feedback: Vec<Option<MoveFeedback>>,
+    history_game_id: Option<i64>,
+}
+
 type HistoryListener = Box<dyn Fn() -> bool>;
 
 pub struct Controller {
@@ -154,6 +189,12 @@ pub struct Controller {
     worker: Worker,
     session: RefCell<HistorySession>,
     history_listeners: RefCell<Vec<HistoryListener>>,
+    exploring: Cell<bool>,
+    exploration: RefCell<Option<Exploration>>,
+    eval_cache: RefCell<EvalCache>,
+    live_eval: RefCell<Option<LiveEval>>,
+    feedback: RefCell<Vec<Option<MoveFeedback>>>,
+    pending_feedback: RefCell<Option<PendingFeedback>>,
     settings: SettingsStore,
     registry: Rc<RefCell<EngineRegistry>>,
     sounds: SoundPlayer,
@@ -232,6 +273,12 @@ impl Controller {
             worker: Worker::new(),
             session: RefCell::new(HistorySession::new()),
             history_listeners: RefCell::new(Vec::new()),
+            exploring: Cell::new(false),
+            exploration: RefCell::new(None),
+            eval_cache: RefCell::new(EvalCache::default()),
+            live_eval: RefCell::new(None),
+            feedback: RefCell::new(Vec::new()),
+            pending_feedback: RefCell::new(None),
             settings,
             registry,
             sounds,
@@ -322,6 +369,19 @@ impl Controller {
         });
         bind(&self.ui.review_button, |c| c.start_review());
         bind(&self.ui.review.close, |c| c.close_review());
+        bind(&self.ui.exploration.back, |c| c.end_exploration());
+        let weak = self.weak();
+        self.ui.analysis.feedback_toggle.connect_toggled(move |button| {
+            let Some(controller) = weak.upgrade() else { return };
+            let wanted = button.is_active();
+            if controller.settings.with(|s| s.live_feedback) == wanted {
+                return;
+            }
+            controller.settings.update(|s| s.live_feedback = wanted);
+            if wanted && controller.stockfish_record().is_none() {
+                controller.toast("Move feedback uses Stockfish — install it from Engines");
+            }
+        });
         let weak = self.weak();
         self.ui.review.connect_seek(move |ply| {
             if let Some(controller) = weak.upgrade() {
@@ -366,6 +426,10 @@ impl Controller {
         self.ui.analysis.root.set_visible(settings.show_analysis && self.analysis_relevant());
         self.refresh_side_panels();
         self.refresh_clocks();
+        // Start or stop live analysis when a setting that needs it was switched.
+        if self.wants_background_analysis() != self.analysis_search.borrow().is_some() {
+            self.schedule_analysis();
+        }
     }
 
     pub fn toast(&self, message: &str) {
@@ -375,7 +439,11 @@ impl Controller {
     }
 
     fn mode(&self) -> GameMode {
-        self.config.borrow().mode
+        if self.exploring.get() {
+            GameMode::Practice
+        } else {
+            self.config.borrow().mode
+        }
     }
 
     fn participant(&self, color: Color) -> Participant {
@@ -383,6 +451,9 @@ impl Controller {
     }
 
     fn is_engine_turn(&self) -> bool {
+        if self.exploring.get() {
+            return false;
+        }
         let game = self.game.borrow();
         !game.is_over() && self.participant(game.turn()).is_engine()
     }
@@ -399,9 +470,20 @@ impl Controller {
         }
     }
 
+    /// Live per-move judging is on: always while exploring a variation, and in
+    /// practice mode when the user switched it on.
+    fn feedback_active(&self) -> bool {
+        self.exploring.get()
+            || (self.settings.with(|s| s.live_feedback) && self.config.borrow().mode == GameMode::Practice)
+    }
+
+    fn eval_bar_visible(&self) -> bool {
+        self.settings.with(|s| s.show_eval_bar) && self.analysis_relevant()
+    }
+
     fn wants_background_analysis(&self) -> bool {
-        let settings = self.settings.with(|s| s.show_analysis);
-        if !settings || self.review_active() {
+        let wanted = self.settings.with(|s| s.show_analysis || s.show_eval_bar) || self.feedback_active();
+        if !wanted || self.review_job.borrow().is_some() {
             return false;
         }
         let over = self.game.borrow().is_over();
@@ -447,11 +529,14 @@ impl Controller {
         if let Some(record) = &engine_record {
             config.engine_id = Some(record.id.clone());
         }
+        self.discard_exploration();
+        self.clear_feedback_state();
         self.cancel_search();
         self.stop_clock_timer();
         self.close_review();
         self.ui.game_over.dismiss();
         self.ui.board.cancel_interaction();
+        self.ui.board.clear_drawings();
 
         let participants = match config.mode {
             GameMode::VersusEngine => {
@@ -784,7 +869,7 @@ impl Controller {
         let Some(record) = self.stockfish_record() else {
             return false;
         };
-        let config = self.full_strength_config(&record, 1);
+        let config = self.full_strength_config(&record, 2);
         match EngineSession::start(&config) {
             Ok((session, events)) => {
                 let generation = self.analyzer_generation.get() + 1;
@@ -855,6 +940,7 @@ impl Controller {
     }
 
     fn schedule_analysis(&self) {
+        self.stash_live_eval();
         if !self.wants_background_analysis() {
             self.cancel_analysis();
             return;
@@ -876,6 +962,13 @@ impl Controller {
         let position = self.game.borrow().position_at(self.view_ply.get()).clone();
         if position.is_game_over() {
             self.cancel_analysis();
+            let (share, label) = if position.is_checkmate() {
+                // The side to move has been mated.
+                if position.turn() == Color::White { (0.0, "0-1") } else { (1.0, "1-0") }
+            } else {
+                (0.5, "½")
+            };
+            self.ui.eval_bar.set(share, label);
             return;
         }
         let id = self.search_counter.get() + 1;
@@ -1016,9 +1109,36 @@ impl Controller {
             return;
         };
         let Some(score) = info.score else { return };
-        if info.pv.is_empty() || !self.settings.with(|s| s.show_analysis) {
+        if info.pv.is_empty() || info.is_bound {
             return;
         }
+        let key = position_key(&active.position);
+        let depth = info.depth.unwrap_or(0);
+        if info.multipv == Some(2) {
+            if let Some(live) = self.live_eval.borrow_mut().as_mut().filter(|live| live.key == key) {
+                live.eval.second = Some(score);
+            }
+            return;
+        }
+        {
+            let mut live = self.live_eval.borrow_mut();
+            match live.as_mut().filter(|live| live.key == key) {
+                Some(current) => {
+                    current.depth = depth;
+                    current.eval.score = score;
+                    current.eval.best = info.pv.first().cloned();
+                }
+                None => {
+                    *live = Some(LiveEval {
+                        key,
+                        depth,
+                        eval: PositionEval { best: info.pv.first().cloned(), score, second: None },
+                    });
+                }
+            }
+        }
+        self.check_pending_feedback();
+
         let now = Instant::now();
         if self
             .last_panel_update
@@ -1033,11 +1153,11 @@ impl Controller {
         } else {
             score.negate()
         };
-        let share = match white_score {
-            Score::Mate(moves) if moves > 0 => 1.0,
-            Score::Mate(_) => 0.0,
-            Score::Centipawns(cp) => 1.0 / (1.0 + (-0.004 * cp as f64).exp()),
-        };
+        let share = white_share(white_score);
+        self.ui.eval_bar.set(share, &bar_label(white_score));
+        if !self.settings.with(|s| s.show_analysis) {
+            return;
+        }
         let mut stats = Vec::new();
         if let Some(depth) = info.depth {
             stats.push(format!("Depth {depth}"));
@@ -1109,9 +1229,21 @@ impl Controller {
     }
 
     pub fn submit_move(&self, from: Square, to: Square, promotion: Option<Role>) {
-        if !self.is_live_view() || self.is_engine_turn() || self.game.borrow().is_over() {
+        if self.is_engine_turn() {
             self.refresh_board(None);
             return;
+        }
+        if !self.is_live_view() || self.game.borrow().is_over() {
+            if !self.can_explore() {
+                self.refresh_board(None);
+                return;
+            }
+            if !self.legal_at_view(from, to, promotion) {
+                self.sounds.play(Sound::Illegal);
+                self.refresh_board(None);
+                return;
+            }
+            self.branch_at_view();
         }
         let candidate = self.game.borrow().find_move(from, to, promotion);
         let Some(mv) = candidate else {
@@ -1130,7 +1262,10 @@ impl Controller {
     }
 
     fn after_move(&self, mv: Move) {
-        self.session.borrow_mut().history_game_id = None;
+        self.stash_live_eval();
+        if !self.exploring.get() {
+            self.session.borrow_mut().history_game_id = None;
+        }
         self.invalidate_review();
         let ply = self.game.borrow().ply_count();
         self.view_ply.set(ply);
@@ -1174,10 +1309,13 @@ impl Controller {
             Sound::Move
         };
         self.sounds.play(sound);
+        let judged_ply = self.game.borrow().ply_count();
         if over {
             self.on_game_over(true);
+            self.begin_feedback(judged_ply);
         } else {
             self.schedule_engine();
+            self.begin_feedback(judged_ply);
             if let Some((from, to, promotion)) = pending_premove {
                 let delay = self.settings.with(|s| s.animation_speed.move_millis()) + 30;
                 let weak = self.weak();
@@ -1220,6 +1358,13 @@ impl Controller {
     }
 
     fn on_game_over(&self, play_sound: bool) {
+        if self.exploring.get() {
+            // A line tried on the board ended; the real game's result stands.
+            self.cancel_search();
+            self.refresh_all(None);
+            self.schedule_engine();
+            return;
+        }
         self.pause_clock();
         self.stop_clock_timer();
         self.cancel_search();
@@ -1365,7 +1510,9 @@ impl Controller {
         self.ui.board.set_status(check, mate);
         let live = ply == game.ply_count() && !game.is_over();
         let turn = game.turn();
-        let human_turn = live && !self.participant(turn).is_engine();
+        let human_turn = live && (self.exploring.get() || !self.participant(turn).is_engine());
+        let view_turn = position.turn();
+        let may_explore = !position.is_game_over() && self.can_explore();
         let premove_color = (live
             && !human_turn
             && self.mode() == GameMode::VersusEngine
@@ -1373,8 +1520,8 @@ impl Controller {
         .then_some(!turn);
         drop(game);
         self.ui.board.set_movable(
-            human_turn && turn == Color::White,
-            human_turn && turn == Color::Black,
+            (human_turn && turn == Color::White) || (may_explore && view_turn == Color::White),
+            (human_turn && turn == Color::Black) || (may_explore && view_turn == Color::Black),
         );
         self.ui.board.set_premove_color(premove_color);
         self.refresh_review_marker();
@@ -1430,7 +1577,7 @@ impl Controller {
         }
         let annotations: Vec<Option<MoveClass>> = match self.review.borrow().as_ref() {
             Some(review) => review.moves.iter().map(|m| Some(m.class)).collect(),
-            None => Vec::new(),
+            None => self.feedback_annotations(),
         };
         let first_number = game.position_at(0).fullmoves().get();
         let black_first = game.position_at(0).turn() == Color::Black;
@@ -1444,6 +1591,11 @@ impl Controller {
             .root
             .set_visible(settings.show_analysis && self.analysis_relevant() && !self.review_active());
         self.ui.review_button.set_sensitive(has_moves && self.review_job.borrow().is_none());
+        self.ui.eval_bar.root.set_visible(self.eval_bar_visible());
+        self.ui.eval_bar.set_flipped(flipped);
+        self.ui.analysis.feedback_toggle.set_active(settings.live_feedback);
+        self.ui.analysis.feedback_toggle.set_visible(!self.exploring.get() && self.config.borrow().mode == GameMode::Practice);
+        self.refresh_feedback_card();
         self.refresh_review_panel();
         self.refresh_status();
         self.refresh_actions();
@@ -1498,6 +1650,7 @@ impl Controller {
                 format!("Playing against {engine}")
             }
             GameMode::TwoPlayers => "Two players".to_owned(),
+            GameMode::Practice if self.exploring.get() => "Analysis line".to_owned(),
             GameMode::Practice => "Practice".to_owned(),
         };
         let subtitle = match self.clock.borrow().as_ref() {
@@ -1598,11 +1751,18 @@ impl Controller {
         };
         self.cancel_search();
         let was_over = self.game.borrow().is_over();
-        if was_over {
+        if was_over && !self.exploring.get() {
             self.retract_completed_game();
         }
-        self.session.borrow_mut().history_game_id = None;
+        if !self.exploring.get() {
+            self.session.borrow_mut().history_game_id = None;
+        }
+        self.pending_feedback.replace(None);
         self.game.borrow_mut().undo_plies(plies);
+        {
+            let remaining = self.game.borrow().ply_count();
+            self.feedback.borrow_mut().truncate(remaining);
+        }
         let ply = self.game.borrow().ply_count();
         self.view_ply.set(ply);
         self.ui.game_over.dismiss();
@@ -1792,6 +1952,261 @@ impl Controller {
 }
 
 impl Controller {
+    // ------------------------------------------------------ live feedback ----
+
+    /// Remembers the engine's latest evaluation of the position that is about
+    /// to stop being analysed, so a later move can be judged against it.
+    fn stash_live_eval(&self) {
+        if let Some(live) = self.live_eval.take()
+            && live.depth > 0
+        {
+            self.eval_cache.borrow_mut().insert(live.key, live.eval, live.depth);
+        }
+    }
+
+    fn ensure_feedback_len(&self) {
+        let count = self.game.borrow().ply_count();
+        self.feedback.borrow_mut().resize(count, None);
+    }
+
+    /// Starts judging the move that produced `ply`: it is classified as soon as
+    /// the engine has looked at the resulting position deeply enough.
+    fn begin_feedback(&self, ply: usize) {
+        self.ensure_feedback_len();
+        self.pending_feedback.replace(None);
+        if !self.feedback_active() || ply == 0 {
+            return;
+        }
+        let (before_key, after_key, terminal) = {
+            let game = self.game.borrow();
+            if ply > game.ply_count() {
+                return;
+            }
+            let after = game.position_at(ply);
+            (position_key(game.position_at(ply - 1)), position_key(after), PositionEval::terminal(after))
+        };
+        let Some(before) = self.eval_cache.borrow().usable(&before_key).cloned() else {
+            return;
+        };
+        if let Some(after) = terminal {
+            self.finish_feedback(ply, &before, &after);
+            return;
+        }
+        let cached = self
+            .eval_cache
+            .borrow()
+            .get(&after_key)
+            .filter(|cached| is_ready(cached.depth, u128::MAX))
+            .map(|cached| cached.eval.clone());
+        if let Some(after) = cached {
+            self.finish_feedback(ply, &before, &after);
+            return;
+        }
+        self.pending_feedback.replace(Some(PendingFeedback {
+            ply,
+            before_key,
+            after_key,
+            started: Instant::now(),
+        }));
+        self.refresh_feedback_card();
+    }
+
+    fn check_pending_feedback(&self) {
+        let Some(pending) = self.pending_feedback.borrow().clone() else { return };
+        let ready = self
+            .live_eval
+            .borrow()
+            .as_ref()
+            .filter(|live| live.key == pending.after_key && is_ready(live.depth, pending.started.elapsed().as_millis()))
+            .map(|live| live.eval.clone());
+        let Some(after) = ready else { return };
+        let Some(before) = self.eval_cache.borrow().usable(&pending.before_key).cloned() else {
+            self.pending_feedback.replace(None);
+            return;
+        };
+        self.pending_feedback.replace(None);
+        self.finish_feedback(pending.ply, &before, &after);
+    }
+
+    fn finish_feedback(&self, ply: usize, before: &PositionEval, after: &PositionEval) {
+        self.ensure_feedback_len();
+        let earlier: Vec<Option<MoveClass>> = self
+            .feedback
+            .borrow()
+            .iter()
+            .take(ply.saturating_sub(1))
+            .map(|feedback| feedback.as_ref().map(|feedback| feedback.class))
+            .collect();
+        let verdict = {
+            let game = self.game.borrow();
+            if ply > game.ply_count() {
+                return;
+            }
+            feedback_for_move(&game, ply, before, after, &earlier)
+        };
+        let Some(verdict) = verdict else { return };
+        if let Some(slot) = self.feedback.borrow_mut().get_mut(ply - 1) {
+            *slot = Some(verdict);
+        }
+        self.refresh_side_panels();
+        self.refresh_review_marker();
+    }
+
+    fn clear_feedback_state(&self) {
+        self.feedback.replace(Vec::new());
+        self.pending_feedback.replace(None);
+        self.live_eval.replace(None);
+        self.eval_cache.borrow_mut().clear();
+    }
+
+    /// Class, whether the move was the engine's choice, and the engine's choice,
+    /// for the move that produced `ply`: from the review if one is shown,
+    /// otherwise from live feedback.
+    fn marker_info(&self, ply: usize) -> Option<(MoveClass, bool, Option<String>)> {
+        // Theory moves and forced moves are never "wrong", so no alternative is suggested.
+        let settled = |class: MoveClass, played_best: bool| played_best || matches!(class, MoveClass::Book | MoveClass::Forced);
+        if let Some(review) = self.review.borrow().as_ref() {
+            return review
+                .move_at(ply)
+                .map(|item| (item.class, settled(item.class, item.played_best), item.best_uci.clone()));
+        }
+        let feedback = self.feedback.borrow();
+        let item = feedback.get(ply.checked_sub(1)?)?.as_ref()?;
+        Some((item.class, settled(item.class, item.played_best), item.best_uci.clone()))
+    }
+
+    fn feedback_annotations(&self) -> Vec<Option<MoveClass>> {
+        if self.review.borrow().is_some() || !(self.feedback_active() || self.exploring.get()) {
+            return Vec::new();
+        }
+        let count = self.game.borrow().ply_count();
+        let feedback = self.feedback.borrow();
+        if feedback.iter().all(Option::is_none) {
+            return Vec::new();
+        }
+        (0..count).map(|index| feedback.get(index).and_then(|item| item.as_ref()).map(|item| item.class)).collect()
+    }
+
+    fn refresh_feedback_card(&self) {
+        let card = &self.ui.feedback;
+        if self.review_active() || !self.feedback_active() {
+            card.hide();
+            return;
+        }
+        let ply = self.view_ply.get();
+        if ply == 0 {
+            card.hide();
+            return;
+        }
+        let shown = self.feedback.borrow().get(ply - 1).cloned().flatten();
+        match shown {
+            Some(feedback) => card.show_feedback(&feedback, self.ui.window.scale_factor()),
+            None if self.pending_feedback.borrow().as_ref().is_some_and(|pending| pending.ply == ply) => {
+                card.show_message("Analyzing your move…", "Stockfish is checking the position");
+            }
+            None => card.hide(),
+        }
+    }
+
+    // ------------------------------------------------------- exploration ----
+
+    /// Moves may be tried on the board when the real game is finished, or when
+    /// an earlier position of a practice game is on display.
+    fn can_explore(&self) -> bool {
+        if self.review_job.borrow().is_some() {
+            return false;
+        }
+        self.game.borrow().is_over() || (self.mode() == GameMode::Practice && !self.is_live_view())
+    }
+
+    fn legal_at_view(&self, from: Square, to: Square, promotion: Option<Role>) -> bool {
+        let position = self.game.borrow().position_at(self.view_ply.get()).clone();
+        Game::from_position(position).find_move(from, to, promotion).is_some()
+    }
+
+    /// Prepares the board for a move from the position on display: starts an
+    /// analysis line (keeping the real game and its review safe), or cuts the
+    /// current line back to the displayed position.
+    fn branch_at_view(&self) {
+        let base = self.view_ply.get();
+        self.cancel_search();
+        self.cancel_analysis();
+        self.stash_live_eval();
+        self.pending_feedback.replace(None);
+        if self.exploring.get() {
+            let total = self.game.borrow().ply_count();
+            self.game.borrow_mut().undo_plies(total - base);
+            self.feedback.borrow_mut().truncate(base);
+            self.view_ply.set(base);
+            return;
+        }
+        let main = self.game.borrow().clone();
+        let mut branch = main.clone();
+        branch.undo_plies(main.ply_count() - base);
+        let prefix: Vec<Option<MoveFeedback>> = (1..=base)
+            .map(|ply| {
+                let from_review = self.review.borrow().as_ref().and_then(|review| {
+                    review.move_at(ply).map(|item| MoveFeedback {
+                        class: item.class,
+                        san: item.san.clone(),
+                        best_uci: item.best_uci.clone(),
+                        best_san: item.best_san.clone(),
+                        played_best: item.played_best,
+                        loss: item.loss,
+                        win_before: item.win_before,
+                        win_after: item.win_after,
+                        score_after_white: Score::Centipawns(0),
+                        score_best_white: Score::Centipawns(0),
+                    })
+                });
+                from_review.or_else(|| self.feedback.borrow().get(ply - 1).cloned().flatten())
+            })
+            .collect();
+        let stash = Exploration {
+            game: main,
+            view_ply: self.view_ply.get(),
+            review: self.review.take(),
+            feedback: self.feedback.replace(prefix),
+            history_game_id: self.session.borrow_mut().history_game_id.take(),
+        };
+        self.game.replace(branch);
+        self.exploration.replace(Some(stash));
+        self.exploring.set(true);
+        self.view_ply.set(base);
+        self.ui.game_over.dismiss();
+        self.ui.review.hide();
+        self.ui.board.set_review_marker(None);
+        self.ui.board.set_arrow(None);
+        self.ui.exploration.show(base / 2 + 1);
+    }
+
+    /// Returns to the real game, with its review and result exactly as they were.
+    pub fn end_exploration(&self) {
+        let Some(stash) = self.exploration.take() else { return };
+        self.cancel_search();
+        self.cancel_analysis();
+        self.stash_live_eval();
+        self.pending_feedback.replace(None);
+        self.exploring.set(false);
+        let total = stash.game.ply_count();
+        self.game.replace(stash.game);
+        self.view_ply.set(stash.view_ply.min(total));
+        self.review.replace(stash.review);
+        self.feedback.replace(stash.feedback);
+        self.session.borrow_mut().history_game_id = stash.history_game_id;
+        self.ui.exploration.hide();
+        self.ui.board.clear_drawings();
+        self.refresh_all(None);
+        self.schedule_engine();
+    }
+
+    /// Forgets an analysis line without restoring anything (a new game replaces everything).
+    fn discard_exploration(&self) {
+        self.exploration.replace(None);
+        self.exploring.set(false);
+        self.ui.exploration.hide();
+    }
+
     pub fn history(&self) -> &HistoryStore {
         &self.history
     }
@@ -1928,7 +2343,7 @@ impl Controller {
             session.record_id.or(session.history_game_id)
         };
         let Some(game_id) = target else { return };
-        if review.moves.len() != self.game.borrow().ply_count() {
+        if self.exploring.get() || review.moves.len() != self.game.borrow().ply_count() {
             return;
         }
         let rows = review_rows(game_id, review);
@@ -2264,22 +2679,28 @@ impl Controller {
     }
 
     fn refresh_review_marker(&self) {
-        let review = self.review.borrow();
         let ply = self.view_ply.get();
-        let Some(item) = review.as_ref().and_then(|review| review.move_at(ply)) else {
+        let Some((class, played_best, best_uci)) = self.marker_info(ply) else {
             self.ui.board.set_review_marker(None);
             self.ui.board.set_arrow(None);
             return;
         };
         let game = self.game.borrow();
-        let Some(played) = game.moves().get(ply - 1) else { return };
+        let Some(played) = ply.checked_sub(1).and_then(|index| game.moves().get(index)) else { return };
         let square = Game::destination_of(&played.mv);
         let scale = self.ui.board.imp_device_scale();
         let pixels = (self.ui.board.width().max(64) as f64 / 8.0 * 0.38 * scale).ceil() as u32;
-        let texture = review_icon_texture(item.class, pixels.max(16));
-        self.ui.board.set_review_marker(texture.map(|texture| (square, texture)));
-        let arrow = (!item.played_best)
-            .then_some(item.best_uci.as_deref())
+        let texture = review_icon_texture(class, pixels.max(16));
+        let marker = texture.map(|texture| (square, texture));
+        match gdk::RGBA::parse(class.color()) {
+            Ok(color) if matches!(class, MoveClass::Brilliant | MoveClass::Great) => {
+                self.ui.board.set_accented_marker(marker, class.label(), color);
+            }
+            Ok(color) if class == MoveClass::Blunder => self.ui.board.set_tinted_marker(marker, color),
+            _ => self.ui.board.set_review_marker(marker),
+        }
+        let arrow = (!played_best)
+            .then_some(best_uci.as_deref())
             .flatten()
             .and_then(|uci| uci.parse::<UciMove>().ok())
             .and_then(|uci| uci.to_move(game.position_at(ply - 1)).ok())

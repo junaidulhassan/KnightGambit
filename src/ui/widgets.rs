@@ -332,6 +332,7 @@ pub struct AnalysisPanel {
     stats: gtk::Label,
     line: gtk::Label,
     bar: gtk::LevelBar,
+    pub feedback_toggle: gtk::ToggleButton,
 }
 
 impl AnalysisPanel {
@@ -347,7 +348,15 @@ impl AnalysisPanel {
         title.set_ellipsize(gtk::pango::EllipsizeMode::End);
         let evaluation = gtk::Label::new(Some("0.00"));
         evaluation.add_css_class("evaluation");
+        let feedback_toggle = gtk::ToggleButton::with_label("Judge moves");
+        feedback_toggle.add_css_class("flat");
+        feedback_toggle.add_css_class("caption");
+        feedback_toggle.set_valign(gtk::Align::Center);
+        feedback_toggle.set_tooltip_text(Some(
+            "Rate every move you play as brilliant, best, inaccuracy, mistake or blunder (practice mode)",
+        ));
         header.append(&title);
+        header.append(&feedback_toggle);
         header.append(&evaluation);
         let bar = gtk::LevelBar::for_interval(0.0, 1.0);
         bar.set_value(0.5);
@@ -378,6 +387,7 @@ impl AnalysisPanel {
             stats,
             line,
             bar,
+            feedback_toggle,
         }
     }
 
@@ -884,5 +894,248 @@ impl ReviewPanel {
 
     pub fn hide(&self) {
         self.root.set_visible(false);
+    }
+}
+
+
+/// A vertical evaluation bar beside the board: White's share fills from White's
+/// side, with the score printed on the side that is ahead.
+pub struct EvalBar {
+    pub root: gtk::DrawingArea,
+    state: Rc<EvalBarState>,
+}
+
+struct EvalBarState {
+    target: std::cell::Cell<f64>,
+    shown: std::cell::Cell<f64>,
+    flipped: std::cell::Cell<bool>,
+    text: RefCell<String>,
+    ticking: std::cell::Cell<bool>,
+}
+
+impl EvalBar {
+    pub fn new() -> Self {
+        let root = gtk::DrawingArea::new();
+        root.set_content_width(26);
+        root.set_vexpand(true);
+        root.add_css_class("eval-bar-vertical");
+        root.update_property(&[gtk::accessible::Property::Label("Evaluation bar")]);
+        let state = Rc::new(EvalBarState {
+            target: std::cell::Cell::new(0.5),
+            shown: std::cell::Cell::new(0.5),
+            flipped: std::cell::Cell::new(false),
+            text: RefCell::new("0.0".to_owned()),
+            ticking: std::cell::Cell::new(false),
+        });
+        let draw_state = state.clone();
+        root.set_draw_func(move |_, cr, width, height| {
+            let (w, h) = (f64::from(width), f64::from(height));
+            let share = draw_state.shown.get().clamp(0.0, 1.0);
+            let flipped = draw_state.flipped.get();
+            cr.save().ok();
+            let radius = 5.0;
+            cr.new_sub_path();
+            cr.arc(w - radius, radius, radius, -std::f64::consts::FRAC_PI_2, 0.0);
+            cr.arc(w - radius, h - radius, radius, 0.0, std::f64::consts::FRAC_PI_2);
+            cr.arc(radius, h - radius, radius, std::f64::consts::FRAC_PI_2, std::f64::consts::PI);
+            cr.arc(radius, radius, radius, std::f64::consts::PI, 1.5 * std::f64::consts::PI);
+            cr.close_path();
+            cr.clip();
+            cr.set_source_rgb(0.18, 0.18, 0.17);
+            let _ = cr.paint();
+            cr.set_source_rgb(0.96, 0.95, 0.92);
+            let white_height = h * share;
+            if flipped {
+                cr.rectangle(0.0, 0.0, w, white_height);
+            } else {
+                cr.rectangle(0.0, h - white_height, w, white_height);
+            }
+            let _ = cr.fill();
+            // Midline marker.
+            cr.set_source_rgba(0.5, 0.5, 0.5, 0.6);
+            cr.rectangle(0.0, h / 2.0 - 0.5, w, 1.0);
+            let _ = cr.fill();
+            // Score text on the leading side.
+            let text = draw_state.text.borrow();
+            cr.select_font_face("Sans", gtk::cairo::FontSlant::Normal, gtk::cairo::FontWeight::Bold);
+            cr.set_font_size(10.0);
+            if let Ok(extents) = cr.text_extents(&text) {
+                let white_leads = share >= 0.5;
+                let at_bottom = white_leads != flipped;
+                let y = if at_bottom { h - 6.0 } else { extents.height() + 6.0 };
+                if white_leads {
+                    cr.set_source_rgb(0.15, 0.15, 0.14);
+                } else {
+                    cr.set_source_rgb(0.95, 0.95, 0.93);
+                }
+                cr.move_to(w / 2.0 - extents.width() / 2.0 - extents.x_bearing(), y);
+                let _ = cr.show_text(&text);
+            }
+            cr.restore().ok();
+        });
+        Self { root, state }
+    }
+
+    pub fn set_flipped(&self, flipped: bool) {
+        self.state.flipped.set(flipped);
+        self.root.queue_draw();
+    }
+
+    /// Shows an evaluation: White's share in 0..=1 and the label to print.
+    pub fn set(&self, white_share: f64, text: &str) {
+        self.state.target.set(white_share.clamp(0.0, 1.0));
+        *self.state.text.borrow_mut() = text.to_owned();
+        self.root.set_tooltip_text(Some(&format!("Evaluation {text} (positive favors White)")));
+        self.animate();
+    }
+
+    pub fn reset(&self) {
+        self.set(0.5, "0.0");
+    }
+
+    fn animate(&self) {
+        if self.state.ticking.replace(true) {
+            return;
+        }
+        let state = self.state.clone();
+        let root = self.root.clone();
+        glib::timeout_add_local(std::time::Duration::from_millis(16), move || {
+            let (shown, target) = (state.shown.get(), state.target.get());
+            let next = shown + (target - shown) * 0.28;
+            let done = (target - next).abs() < 0.002;
+            state.shown.set(if done { target } else { next });
+            root.queue_draw();
+            if done {
+                state.ticking.set(false);
+                glib::ControlFlow::Break
+            } else {
+                glib::ControlFlow::Continue
+            }
+        });
+    }
+}
+
+impl Default for EvalBar {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// A short card telling how the last move was judged and what was best.
+pub struct FeedbackCard {
+    pub root: gtk::Box,
+    icon: gtk::Image,
+    title: gtk::Label,
+    detail: gtk::Label,
+}
+
+impl FeedbackCard {
+    pub fn new() -> Self {
+        let root = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        root.add_css_class("card");
+        root.add_css_class("feedback-card");
+        let icon = gtk::Image::new();
+        icon.set_pixel_size(32);
+        icon.set_valign(gtk::Align::Center);
+        let text = gtk::Box::new(gtk::Orientation::Vertical, 2);
+        text.set_hexpand(true);
+        let title = gtk::Label::new(None);
+        title.add_css_class("heading");
+        title.set_xalign(0.0);
+        title.set_wrap(true);
+        let detail = gtk::Label::new(None);
+        detail.add_css_class("caption");
+        detail.add_css_class("dim-label");
+        detail.set_xalign(0.0);
+        detail.set_wrap(true);
+        text.append(&title);
+        text.append(&detail);
+        root.append(&icon);
+        root.append(&text);
+        root.set_visible(false);
+        Self { root, icon, title, detail }
+    }
+
+    pub fn hide(&self) {
+        self.root.set_visible(false);
+    }
+
+    pub fn show_message(&self, title: &str, detail: &str) {
+        self.icon.set_visible(false);
+        self.title.set_markup(&glib::markup_escape_text(title));
+        self.detail.set_label(detail);
+        self.root.set_visible(true);
+    }
+
+    pub fn show_feedback(&self, feedback: &crate::review::MoveFeedback, scale: i32) {
+        let class = feedback.class;
+        if let Some(texture) = crate::ui::art::review_icon_texture(class, (32 * scale.max(1)) as u32) {
+            self.icon.set_paintable(Some(&texture));
+            self.icon.set_visible(true);
+        }
+        self.title.set_markup(&format!(
+            "<span foreground=\"{}\">{} {}</span>",
+            class.color(),
+            glib::markup_escape_text(&feedback.san),
+            class.article_phrase()
+        ));
+        let mut detail = format!("Evaluation {}", feedback.score_after_white.display());
+        if !feedback.played_best
+            && !matches!(class, MoveClass::Book | MoveClass::Forced)
+            && let Some(best) = &feedback.best_san
+        {
+            detail.push_str(&format!(" · Best was {best} ({})", feedback.score_best_white.display()));
+        }
+        self.detail.set_label(&detail);
+        self.root.set_visible(true);
+    }
+}
+
+impl Default for FeedbackCard {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Banner shown while a variation is being explored.
+pub struct ExplorationBanner {
+    pub root: gtk::Box,
+    label: gtk::Label,
+    pub back: gtk::Button,
+}
+
+impl ExplorationBanner {
+    pub fn new() -> Self {
+        let root = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        root.add_css_class("card");
+        root.add_css_class("exploration-banner");
+        let label = gtk::Label::new(None);
+        label.set_xalign(0.0);
+        label.set_hexpand(true);
+        label.set_wrap(true);
+        let back = gtk::Button::with_label("Back to Game");
+        back.add_css_class("suggested-action");
+        back.set_valign(gtk::Align::Center);
+        root.append(&label);
+        root.append(&back);
+        root.set_visible(false);
+        Self { root, label, back }
+    }
+
+    pub fn show(&self, from_move: usize) {
+        self.label.set_markup(&format!(
+            "<b>Analysis line</b>\n<span size=\"small\" alpha=\"70%\">Your moves branch from move {from_move}. The game is untouched.</span>"
+        ));
+        self.root.set_visible(true);
+    }
+
+    pub fn hide(&self) {
+        self.root.set_visible(false);
+    }
+}
+
+impl Default for ExplorationBanner {
+    fn default() -> Self {
+        Self::new()
     }
 }

@@ -12,7 +12,9 @@ use crate::ui::board::{BoardFrame, BoardWidget};
 use crate::ui::controller::{Controller, Ui};
 use crate::ui::dialogs;
 use crate::ui::sound::SoundPlayer;
-use crate::ui::widgets::{AnalysisPanel, GameOverCard, MoveList, PlayerBar, ReviewPanel};
+use crate::ui::widgets::{
+    AnalysisPanel, EvalBar, ExplorationBanner, FeedbackCard, GameOverCard, MoveList, PlayerBar, ReviewPanel,
+};
 
 const MIN_SIDEBAR_WIDTH: i32 = 300;
 const MAX_SIDEBAR_WIDTH: i32 = 900;
@@ -121,6 +123,9 @@ impl MainWindow {
         let top_bar = PlayerBar::new();
         let bottom_bar = PlayerBar::new();
         let frame = BoardFrame::new(&top_bar.root, &board, &bottom_bar.root);
+        let eval_bar = EvalBar::new();
+        eval_bar.root.set_visible(false);
+        frame.set_side_bar(&eval_bar.root);
         frame.set_margin_top(12);
         frame.set_margin_bottom(12);
         frame.set_margin_start(16);
@@ -162,6 +167,8 @@ impl MainWindow {
         status_card.append(&status_text);
 
         let analysis = AnalysisPanel::new();
+        let feedback = FeedbackCard::new();
+        let exploration = ExplorationBanner::new();
         let review = ReviewPanel::new();
         review.hide();
         let review_button = labeled_button("kg-review-symbolic", "Game Review");
@@ -216,6 +223,8 @@ impl MainWindow {
         sidebar.set_margin_end(12);
         let scroll_content = gtk::Box::new(gtk::Orientation::Vertical, 10);
         scroll_content.append(&status_card);
+        scroll_content.append(&exploration.root);
+        scroll_content.append(&feedback.root);
         scroll_content.append(&analysis.root);
         scroll_content.append(&review.root);
         scroll_content.append(&moves_frame);
@@ -332,6 +341,9 @@ impl MainWindow {
             game_over,
             review,
             review_button,
+            eval_bar,
+            feedback,
+            exploration,
         };
         let sounds = SoundPlayer::new(&paths::sounds_dir());
         let controller = Controller::new(ui, settings.clone(), registry, sounds, history);

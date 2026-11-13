@@ -41,6 +41,25 @@ implements the complete official rules of chess, and plays against genuine open-
   player's accuracy (harmonic and volatility-weighted average, so a few blunders cannot hide behind many easy
   moves), an estimated game rating (Elo) derived from accuracy and blunder rate, colored
   per-class counts and a clickable evaluation graph. Review depth is configurable (Fast, Standard, Deep).
+- **Move feedback**: switch on **Judge moves** (in the analysis card, or Preferences) and, in practice mode,
+  Stockfish rates every move right after you play it: Brilliant, Great, Best, Excellent, Good, Inaccuracy,
+  Mistake, Miss or Blunder. The class appears as a badge on the board, in the move list and in a feedback card
+  that names the engine's preferred move (drawn as an arrow) and the evaluation. It uses the same
+  classification as Game Review, so the two always agree.
+- **Evaluation bar**: a vertical bar beside the board shows who is ahead (White's share fills from White's side,
+  with the score on the leading side) and follows every position you set up, with or without the other
+  analysis features switched on. It can be turned off in Preferences.
+- **Analysis line**: when a game is over (and also while its review is shown) you can simply make your own
+  moves on the board, or step back to any earlier move and play something different. Your moves branch off
+  into an *analysis line* with live Stockfish feedback and evaluation, while the real game, its result, its
+  review and your history stay untouched. **Back to Game** returns to it exactly as you left it. In practice
+  mode the same works from any earlier position.
+- **Arrows and marks**: hold the right mouse button and drag to draw an arrow, click the right button on a
+  square to mark it. Hold **Shift** for red, **Ctrl** for blue or **Alt** for yellow (green by default).
+  Drawing the same arrow again removes it. Arrows work during games, analysis and review, and clear when you
+  left-click the board, press Escape or the position changes. Knight moves are drawn as an "L" (two squares
+  along one direction, then one across), also for the engine's best-move arrows. A right-click with a premove
+  or selection pending still cancels it.
 - **Live analysis**: in practice mode and after a game, Stockfish evaluates the position you are viewing at
   full strength and shows the evaluation, depth and best line. Opponent engines are never used for analysis.
 - **Premoves**: while the engine is thinking, drag or click your next move. It is highlighted in red and
@@ -104,7 +123,7 @@ cargo run --release
 
 ```bash
 make deb
-sudo apt install ./dist/knightgambit_1.1.0_amd64.deb
+sudo apt install ./dist/knightgambit_1.2.0_amd64.deb
 ```
 
 KnightGambit then appears in the GNOME application grid with its icon and desktop entry.
@@ -187,6 +206,9 @@ The test suites cover:
   refusal of newer schemas, record building (results, resignation, opening and ECO detection, endgame phase),
   search, filters and sorting, and every statistic: totals, streaks, trends, opening rankings, per-color and
   per-level results, move quality (user moves of reviewed games only), phases, progress and insights.
+- `tests/analysis_tools.rs`: knight-arrow corner geometry, arrow and mark toggling, modifier colors, the live
+  evaluation cache and depth rules, the evaluation-bar mapping, and a regression check that live per-move
+  classification equals the full-game review for every move (plus blunder, Book and Forced cases).
 - `tests/settings.rs`: settings persistence and corruption recovery, board presets, piece rendering coverage
   at several sizes, and texture determinism.
 
@@ -196,7 +218,8 @@ Two developer examples support manual verification:
   downloading real engines. Add it with **Add Engine Executable…**.
 - `KG_SCRIPT="moves:e4 e5;shot:/tmp/board.png;quit" cargo run --example ui_snapshot` drives the real window
   and renders it to PNG (`moves:`, `click:<square>`, `fen:`, `action:<win.action>`, `size:WxH`,
-  `wait:<ms>`, `shot:<path>`, `quit`).
+  `wait:<ms>`, `shot:<path>`, `quit`; also `rdrag:<from>-<to>`, `resign`, `review`, `takeback`, `goto:<ply>`,
+  `back`, `seed:<n>`; `KG_MOCK_ENGINE`, `KG_HISTORY_DB` and `GDK_BACKEND=broadway` allow headless runs).
 
 
 ## Files and settings

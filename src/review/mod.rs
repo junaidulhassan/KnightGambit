@@ -3,14 +3,14 @@ mod live;
 mod openings;
 
 pub use eco::{eco_code, opening_family, opening_of};
-pub use live::{EvalCache, MoveFeedback, READY_DEPTH, feedback_for_move, is_ready, position_key, white_share};
+pub use live::{EvalCache, bar_label, MoveFeedback, READY_DEPTH, feedback_for_move, is_ready, position_key, white_share};
 
 pub use openings::{OPENING_LINES, OpeningBook, invalid_lines, opening_book};
 
 use serde::{Deserialize, Serialize};
 use shakmaty::san::San;
 use shakmaty::uci::UciMove;
-use shakmaty::{Chess, Color, Move, Position, Role};
+use shakmaty::{Chess, Color, Move, Position, Role, Square};
 
 use crate::chess::Game;
 use crate::engine::uci::Score;
@@ -222,24 +222,22 @@ pub fn win_percent(score: Score) -> f64 {
     }
 }
 
-const ELO_CURVE: [(f64, f64); 14] = [
+/// Accuracy to performance rating, calibrated against chess.com game reviews.
+const ELO_CURVE: [(f64, f64); 11] = [
     (0.0, 100.0),
-    (40.0, 400.0),
-    (50.0, 600.0),
-    (60.0, 850.0),
-    (65.0, 1000.0),
+    (40.0, 250.0),
+    (50.0, 450.0),
+    (60.0, 750.0),
     (70.0, 1150.0),
-    (75.0, 1350.0),
-    (80.0, 1550.0),
-    (85.0, 1800.0),
-    (88.0, 2000.0),
-    (91.0, 2250.0),
-    (94.0, 2550.0),
-    (97.0, 2850.0),
+    (75.0, 1450.0),
+    (80.0, 1775.0),
+    (85.0, 2025.0),
+    (90.0, 2350.0),
+    (95.0, 2750.0),
     (100.0, 3200.0),
 ];
 
-pub fn estimate_elo(accuracy: f64, scored_moves: usize, blunders: usize) -> Option<u32> {
+pub fn estimate_elo(accuracy: f64, scored_moves: usize) -> Option<u32> {
     if scored_moves < 6 {
         return None;
     }
@@ -253,65 +251,40 @@ pub fn estimate_elo(accuracy: f64, scored_moves: usize, blunders: usize) -> Opti
             break;
         }
     }
-    let blunder_rate = blunders as f64 / scored_moves as f64;
-    estimate -= (blunder_rate * 2600.0).min(800.0);
-    let rounded = (estimate.max(100.0) / 25.0).round() * 25.0;
+    let rounded = (estimate.max(100.0) / 50.0).round() * 50.0;
     Some(rounded as u32)
 }
 
-fn standard_deviation(values: &[f64]) -> f64 {
-    if values.is_empty() {
-        return 0.0;
-    }
-    let mean = values.iter().sum::<f64>() / values.len() as f64;
-    (values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / values.len() as f64).sqrt()
-}
+/// A single move never drags the harmonic mean below this accuracy, so one
+/// blunder in an otherwise clean game does not wipe out the whole score.
+const HARMONIC_FLOOR: f64 = 10.0;
 
-pub fn game_accuracy(white_curve: &[f64], moves: &[MoveReview]) -> [f64; 2] {
-    if moves.is_empty() || white_curve.len() < 2 {
-        return [0.0, 0.0];
-    }
-    let window = (moves.len() / 10).clamp(2, 8).min(white_curve.len());
-    let mut windows: Vec<&[f64]> = Vec::with_capacity(moves.len());
-    for _ in 0..window.saturating_sub(2) {
-        windows.push(&white_curve[..window]);
-    }
-    for start in 0..=white_curve.len() - window {
-        windows.push(&white_curve[start..start + window]);
-    }
-    let mut weighted = [(0.0f64, 0.0f64); 2];
-    let mut harmonic = [(0.0f64, 0usize); 2];
-    for (index, item) in moves.iter().enumerate() {
-        if !item.class.counts_for_accuracy() {
-            continue;
-        }
+/// Game accuracy per side: the average of the arithmetic and the harmonic
+/// mean of the move accuracies. Book and forced moves are left out.
+pub fn game_accuracy(moves: &[MoveReview]) -> [f64; 2] {
+    let mut sums = [(0.0f64, 0.0f64, 0usize); 2];
+    for item in moves.iter().filter(|item| item.class.counts_for_accuracy()) {
         let slot = match item.mover {
             Color::White => 0,
             Color::Black => 1,
         };
-        let weight = windows
-            .get(index)
-            .map(|values| standard_deviation(values))
-            .unwrap_or(0.5)
-            .clamp(0.5, 12.0);
-        weighted[slot].0 += item.accuracy * weight;
-        weighted[slot].1 += weight;
-        harmonic[slot].0 += 1.0 / item.accuracy.max(1.0);
-        harmonic[slot].1 += 1;
+        sums[slot].0 += item.accuracy;
+        sums[slot].1 += 1.0 / item.accuracy.max(HARMONIC_FLOOR);
+        sums[slot].2 += 1;
     }
-    [0, 1].map(|slot| {
-        let (sum, weights) = weighted[slot];
-        let (inverse, count) = harmonic[slot];
-        if count == 0 || weights <= 0.0 {
+    sums.map(|(sum, inverse, count)| {
+        if count == 0 {
             return 0.0;
         }
-        let weighted_mean = sum / weights;
-        let harmonic_mean = count as f64 / inverse;
-        ((weighted_mean + harmonic_mean) / 2.0).clamp(0.0, 100.0)
+        let arithmetic = sum / count as f64;
+        let harmonic = count as f64 / inverse;
+        ((arithmetic + harmonic) / 2.0).clamp(0.0, 100.0)
     })
 }
 
-const REVIEW_CP_CAP: i32 = 2000;
+/// Beyond ten pawns the game is decided and engine scores swing wildly, so
+/// differences past this point are not counted as lost material.
+const REVIEW_CP_CAP: i32 = 1000;
 
 fn review_cp(score: Score) -> i32 {
     score.as_centipawns().clamp(-REVIEW_CP_CAP, REVIEW_CP_CAP)
@@ -331,9 +304,7 @@ pub fn effective_loss(before: Score, after: Score, win_before: f64, win_after: f
 
 pub fn move_accuracy(loss: f64) -> f64 {
     let loss = loss.max(0.0);
-    let base = 103.1668 * (-0.04354 * loss).exp() - 3.1669 + 1.0;
-    let blunder_penalty = if loss > 20.0 { (-(loss - 20.0) / 8.0).exp() } else { 1.0 };
-    (base * blunder_penalty).clamp(0.0, 100.0)
+    (103.1668 * (-0.04354 * loss).exp() - 3.1669 + 1.0).clamp(0.0, 100.0)
 }
 
 fn piece_value(role: Role) -> i32 {
@@ -380,6 +351,43 @@ pub fn is_sacrifice(before: &Chess, mv: &Move) -> bool {
     net_loss >= 2
 }
 
+/// Moves anyone would find: taking back on the square the opponent just moved
+/// to, or stepping away with a piece that is hanging or attacked by a cheaper
+/// one. They are never singled out as great moves.
+fn is_obvious(before: &Chess, mv: &Move, previous_to: Option<Square>) -> bool {
+    if mv.is_capture() && previous_to == Some(mv.to()) {
+        return true;
+    }
+    let Some(from) = mv.from() else { return false };
+    if mv.role() == Role::King {
+        return false;
+    }
+    let mover = before.turn();
+    let board = before.board();
+    let occupied = board.occupied();
+    let attackers = board.attacks_to(from, !mover, occupied);
+    if attackers.is_empty() {
+        return false;
+    }
+    let cheapest_attacker = attackers
+        .into_iter()
+        .filter_map(|square| board.piece_at(square))
+        .map(|piece| piece_value(piece.role))
+        .min()
+        .unwrap_or(100);
+    cheapest_attacker < piece_value(mv.role()) || board.attacks_to(from, mover, occupied).is_empty()
+}
+
+/// Whether the opponent's recent play handed the mover a chance: their last
+/// move was a mistake or blunder, or the one before it was and the mover has
+/// kept the chance alive since. `class_at` returns the class of a 0-based
+/// move index; `index` is the move being judged.
+pub fn opponent_gave_chance(class_at: impl Fn(usize) -> Option<MoveClass>, index: usize) -> bool {
+    let gift = |at: usize| matches!(class_at(at), Some(MoveClass::Mistake | MoveClass::Blunder));
+    let sound = |at: usize| class_at(at).is_some_and(|class| !class.is_error());
+    (index >= 1 && gift(index - 1)) || (index >= 3 && gift(index - 3) && sound(index - 2) && sound(index - 1))
+}
+
 fn uci_to_san(position: &Chess, uci: &str) -> Option<String> {
     let mv = uci.parse::<UciMove>().ok()?.to_move(position).ok()?;
     Some(San::from_move(position, mv).to_string())
@@ -396,8 +404,10 @@ pub struct MoveInput<'a> {
     pub after: &'a PositionEval,
     /// The line is still inside the opening book.
     pub in_book: bool,
-    /// The opponent's previous move was a mistake or blunder.
+    /// The opponent recently erred, see [`opponent_gave_chance`].
     pub opponent_erred: bool,
+    /// Destination square of the opponent's previous move.
+    pub previous_to: Option<Square>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -421,6 +431,7 @@ pub fn classify_move(input: &MoveInput<'_>) -> MoveVerdict {
         after,
         in_book,
         opponent_erred,
+        previous_to,
     } = *input;
     let win_before = win_percent(before.score);
     let delivered_mate = after_position.is_checkmate();
@@ -436,10 +447,14 @@ pub fn classify_move(input: &MoveInput<'_>) -> MoveVerdict {
         MoveClass::Book
     } else if legal_count == 1 {
         MoveClass::Forced
-    } else if played_best || loss < 0.6 {
-        if loss <= 2.0 && win_after >= 45.0 && win_before < 97.0 && legal_count > 1 && is_sacrifice(before_position, &played.mv) {
+    } else if played_best {
+        if loss <= 2.0 && win_after >= 45.0 && win_before < 97.0 && is_sacrifice(before_position, &played.mv) {
             MoveClass::Brilliant
-        } else if legal_count > 1 && second_gap >= 15.0 && win_before < 97.0 && win_after >= 30.0 {
+        } else if second_gap >= 15.0
+            && win_before < 97.0
+            && win_after >= 30.0
+            && !is_obvious(before_position, &played.mv, previous_to)
+        {
             MoveClass::Great
         } else {
             MoveClass::Best
@@ -448,10 +463,10 @@ pub fn classify_move(input: &MoveInput<'_>) -> MoveVerdict {
         MoveClass::Excellent
     } else if loss <= 5.0 {
         MoveClass::Good
-    } else if opponent_erred && win_after >= 35.0 {
-        MoveClass::Miss
     } else if loss <= 10.0 {
         MoveClass::Inaccuracy
+    } else if opponent_erred && win_before >= 55.0 && win_after >= 40.0 {
+        MoveClass::Miss
     } else if loss <= 20.0 {
         MoveClass::Mistake
     } else {
@@ -486,7 +501,6 @@ pub fn classify_game(game: &Game, evals: &[PositionEval]) -> GameReview {
     }
     let mut tallies = [0usize; 2];
     let mut counts = [[0usize; CLASS_COUNT]; 2];
-    let mut previous: Option<MoveClass> = None;
     let book = opening_book();
     let mut in_book = game.starts_from_standard_position();
     let mut opening: Option<String> = None;
@@ -506,7 +520,8 @@ pub fn classify_game(game: &Game, evals: &[PositionEval]) -> GameReview {
             before: &evals[index],
             after: &evals[index + 1],
             in_book,
-            opponent_erred: previous.is_some_and(|class| matches!(class, MoveClass::Mistake | MoveClass::Blunder)),
+            opponent_erred: opponent_gave_chance(|at| moves.get(at).map(|item: &MoveReview| item.class), index),
+            previous_to: index.checked_sub(1).map(|at| game.moves()[at].mv.to()),
         });
         let class = verdict.class;
         let slot = match mover {
@@ -517,7 +532,6 @@ pub fn classify_game(game: &Game, evals: &[PositionEval]) -> GameReview {
             tallies[slot] += 1;
         }
         counts[slot][class.index()] += 1;
-        previous = Some(class);
         let before = &evals[index];
         let best_san = before.best.as_deref().and_then(|uci| uci_to_san(before_position, uci));
         moves.push(MoveReview {
@@ -534,10 +548,8 @@ pub fn classify_game(game: &Game, evals: &[PositionEval]) -> GameReview {
             played_best: verdict.played_best,
         });
     }
-    let accuracy = game_accuracy(&white_curve, &moves);
-    let estimated_elo = [0, 1].map(|slot| {
-        estimate_elo(accuracy[slot], tallies[slot], counts[slot][MoveClass::Blunder.index()])
-    });
+    let accuracy = game_accuracy(&moves);
+    let estimated_elo = [0, 1].map(|slot| estimate_elo(accuracy[slot], tallies[slot]));
     GameReview {
         moves,
         white_curve,

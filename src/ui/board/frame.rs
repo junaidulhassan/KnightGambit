@@ -12,6 +12,7 @@ mod imp {
         pub top: RefCell<Option<gtk::Widget>>,
         pub board: RefCell<Option<gtk::Widget>>,
         pub bottom: RefCell<Option<gtk::Widget>>,
+        pub side: RefCell<Option<gtk::Widget>>,
     }
 
     #[glib::object_subclass]
@@ -27,7 +28,7 @@ mod imp {
 
     impl ObjectImpl for BoardFrame {
         fn dispose(&self) {
-            for slot in [&self.top, &self.board, &self.bottom] {
+            for slot in [&self.top, &self.board, &self.bottom, &self.side] {
                 if let Some(child) = slot.take() {
                     child.unparent();
                 }
@@ -43,7 +44,10 @@ mod imp {
         fn measure(&self, orientation: gtk::Orientation, _for_size: i32) -> (i32, i32, i32, i32) {
             let bars = self.bar_height();
             match orientation {
-                gtk::Orientation::Horizontal => (240, 720, -1, -1),
+                gtk::Orientation::Horizontal => {
+                    let side = self.side_width();
+                    (240 + side, 720 + side, -1, -1)
+                }
                 _ => (240 + bars, 720 + bars, -1, -1),
             }
         }
@@ -52,9 +56,10 @@ mod imp {
             let top_height = self.child_height(&self.top);
             let bottom_height = self.child_height(&self.bottom);
             let gap = 6;
+            let bar_width = self.side_width();
             let available_height = (height - top_height - bottom_height - gap * 2).max(64);
-            let side = available_height.min(width).max(64);
-            let x = (width - side) / 2;
+            let side = available_height.min(width - bar_width).max(64);
+            let x = (width - side - bar_width) / 2 + bar_width;
             let total = top_height + gap + side + gap + bottom_height;
             let mut y = ((height - total) / 2).max(0);
             if let Some(top) = self.top.borrow().as_ref() {
@@ -63,6 +68,10 @@ mod imp {
             y += top_height + gap;
             if let Some(board) = self.board.borrow().as_ref() {
                 board.size_allocate(&gtk::Allocation::new(x, y, side, side), -1);
+            }
+            if let Some(bar) = self.side.borrow().as_ref().filter(|bar| bar.is_visible()) {
+                let bar_width = bar.measure(gtk::Orientation::Horizontal, -1).1;
+                bar.size_allocate(&gtk::Allocation::new(x - bar_width - 6, y, bar_width, side), -1);
             }
             y += side + gap;
             if let Some(bottom) = self.bottom.borrow().as_ref() {
@@ -77,6 +86,16 @@ mod imp {
                 .as_ref()
                 .filter(|child| child.is_visible())
                 .map(|child| child.measure(gtk::Orientation::Vertical, -1).1)
+                .unwrap_or(0)
+        }
+
+        /// Width taken by the evaluation bar and its gap, or 0 when hidden.
+        fn side_width(&self) -> i32 {
+            self.side
+                .borrow()
+                .as_ref()
+                .filter(|bar| bar.is_visible())
+                .map(|bar| bar.measure(gtk::Orientation::Horizontal, -1).1 + 6)
                 .unwrap_or(0)
         }
 
@@ -107,6 +126,13 @@ impl BoardFrame {
             slot.replace(Some(child.clone()));
         }
         frame
+    }
+
+    /// Places a bar (the evaluation bar) against the board's left edge.
+    pub fn set_side_bar(&self, bar: &impl IsA<gtk::Widget>) {
+        let widget = bar.as_ref();
+        widget.set_parent(self);
+        self.imp().side.replace(Some(widget.clone()));
     }
 
     pub fn swap_bars(&self) {

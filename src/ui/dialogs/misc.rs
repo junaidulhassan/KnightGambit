@@ -122,6 +122,12 @@ pub fn present_about(controller: &Rc<Controller>) {
         None,
     );
     about.add_legal_section(
+        "Classic Staunton chess pieces",
+        Some("© Colin M.L. Burnett"),
+        gtk::License::Gpl20,
+        None,
+    );
+    about.add_legal_section(
         "Engine logos",
         None,
         gtk::License::Custom,

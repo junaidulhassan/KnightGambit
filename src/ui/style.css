@@ -363,3 +363,8 @@ progressbar.progress-bar-wide progress { min-height: 10px; border-radius: 5px; }
 .insight-improvement { border-left-color: #3584e4; }
 .insight-improvement .insight-icon { color: #3584e4; }
 .insight-note .insight-icon { color: alpha(currentColor, 0.6); }
+
+/* ---- Evaluation bar, move feedback, analysis line ---- */
+.eval-bar-vertical { min-width: 24px; }
+.feedback-card { padding: 10px 14px; }
+.exploration-banner { padding: 10px 14px; background-color: alpha(@accent_bg_color, 0.14); }
