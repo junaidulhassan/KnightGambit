@@ -1,5 +1,6 @@
 mod animation;
 mod checkmate_animation;
+mod draw_animation;
 mod frame;
 mod geometry;
 mod imp;
@@ -108,6 +109,11 @@ impl BoardWidget {
             self.imp().start_checkmate(loser);
         }
         self.queue_draw();
+    }
+
+    /// Plays the draw presentation on both kings, or clears it.
+    pub fn set_draw(&self, drawn: bool) {
+        self.imp().set_draw(drawn);
     }
 
     pub fn set_movable(&self, white: bool, black: bool) {

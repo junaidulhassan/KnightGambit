@@ -1508,6 +1508,8 @@ impl Controller {
         let check = game.checked_king(ply);
         let mate = (ply == game.ply_count() && position.is_checkmate()).then_some(check).flatten();
         self.ui.board.set_status(check, mate);
+        let drawn = ply == game.ply_count() && game.result().is_some_and(|result| result.winner.is_none());
+        self.ui.board.set_draw(drawn);
         let live = ply == game.ply_count() && !game.is_over();
         let turn = game.turn();
         let human_turn = live && (self.exploring.get() || !self.participant(turn).is_engine());

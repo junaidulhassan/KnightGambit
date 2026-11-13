@@ -9,6 +9,7 @@ use shakmaty::{Board, Chess, Color, Move, Piece, Position, Role, Square};
 
 use super::animation::{MoveAnimation, Pulse, SlidingPiece, ease_out_back, ease_out_cubic};
 use super::checkmate_animation::{CheckmateAnimation, CheckmateConfig, ease_in_cubic};
+use super::draw_animation::{DrawAnimation, DrawConfig};
 use super::geometry::BoardGeometry;
 use crate::assets::{PieceStyle, leather_texture_rgba, render_piece_rgba};
 use crate::chess::{DrawColor, Drawings, Game, UserArrow, is_promotion_square, knight_elbow, premove_destinations};
@@ -101,6 +102,7 @@ pub struct BoardState {
     pub animation: Option<MoveAnimation>,
     pub select_pulse: Option<Pulse>,
     pub checkmate: Option<CheckmateAnimation>,
+    pub draw: Option<DrawAnimation>,
     pub flipped: bool,
     pub appearance: BoardAppearance,
     pub suppress_next_slide: bool,
@@ -310,6 +312,7 @@ impl WidgetImpl for BoardWidget {
         self.draw_arrows(snapshot, &geometry, &state);
         self.draw_marker(snapshot, &geometry, &state, now);
         self.draw_checkmate_overlay(snapshot, &geometry, &state);
+        self.draw_draw_overlay(snapshot, &geometry, &state);
         self.draw_promotion(snapshot, &geometry, &state);
     }
 }
@@ -510,6 +513,12 @@ impl BoardWidget {
                 1.0,
                 &stops,
             );
+        }
+        if let Some(draw) = state.draw.as_ref() {
+            let tint = gdk::RGBA::new(0.33, 0.31, 0.29, 0.72 * draw.overlay() as f32);
+            for king in draw.kings() {
+                snapshot.append_color(&tint, &geometry.square_rect(king));
+            }
         }
         if let Some(checkmate) = state.checkmate.as_ref() {
             let red = gdk::RGBA::new(0.878, 0.294, 0.294, checkmate.red_alpha() as f32);
@@ -713,7 +722,18 @@ impl BoardWidget {
                 .as_ref()
                 .filter(|checkmate| checkmate.loser() == square)
                 .map_or(1.0, |checkmate| checkmate.king_scale() as f32);
-            self.append_piece(snapshot, piece, &geometry.square_rect(square), scale);
+            let dim = state
+                .draw
+                .as_ref()
+                .filter(|draw| draw.kings().contains(&square))
+                .map_or(0.0, |draw| draw.overlay());
+            if dim > 0.0 {
+                snapshot.push_opacity(1.0 - 0.6 * dim);
+                self.append_piece(snapshot, piece, &geometry.square_rect(square), scale);
+                snapshot.pop();
+            } else {
+                self.append_piece(snapshot, piece, &geometry.square_rect(square), scale);
+            }
         }
         if let Some(animation) = animation {
             let eased = ease_out_cubic(animation.progress(now)) as f32;
@@ -952,6 +972,96 @@ impl BoardWidget {
         );
     }
 
+    fn draw_draw_overlay(&self, snapshot: &gtk::Snapshot, geometry: &BoardGeometry, state: &BoardState) {
+        let Some(draw) = state.draw.as_ref() else { return };
+        let board = geometry.board_rect();
+        let square = geometry.square;
+        let white = gdk::RGBA::new(1.0, 1.0, 1.0, 1.0);
+        let ink = gdk::RGBA::new(0.24, 0.22, 0.21, 1.0);
+        let half = |size: f32| {
+            let layout = self.coordinate_layout("½", size);
+            let mut description = layout.font_description().unwrap_or_default();
+            description.set_weight(pango::Weight::Heavy);
+            layout.set_font_description(Some(&description));
+            layout
+        };
+        let overlay = draw.overlay();
+        let grow = draw.overlay_scale() as f32;
+        if overlay > 0.0 && grow > 0.01 {
+            snapshot.push_opacity(overlay);
+            for king in draw.kings() {
+                let rect = geometry.square_rect(king);
+                let center = graphene::Point::new(rect.x() + rect.width() / 2.0, rect.y() + rect.height() / 2.0);
+                snapshot.save();
+                snapshot.translate(&center);
+                snapshot.scale(grow, grow);
+                snapshot.translate(&graphene::Point::new(-center.x(), -center.y()));
+                let glyph = half(square * 0.5);
+                let (width, height) = glyph.pixel_size();
+                let origin = (center.x() - width as f32 / 2.0, center.y() - height as f32 / 2.0 + square * 0.04);
+                let outline = (square * 0.035).max(1.0);
+                for (dx, dy) in [
+                    (-1.0, 0.0),
+                    (1.0, 0.0),
+                    (0.0, -1.0),
+                    (0.0, 1.0),
+                    (-0.7, -0.7),
+                    (0.7, -0.7),
+                    (-0.7, 0.7),
+                    (0.7, 0.7),
+                ] {
+                    self.draw_text(snapshot, &glyph, origin.0 + dx * outline, origin.1 + dy * outline, ink);
+                }
+                self.draw_text(snapshot, &glyph, origin.0, origin.1, white);
+                let label = self.coordinate_layout("Draw", square * 0.2);
+                let mut description = label.font_description().unwrap_or_default();
+                description.set_weight(pango::Weight::Bold);
+                label.set_font_description(Some(&description));
+                let (text_width, text_height) = label.pixel_size();
+                let (pill_width, pill_height) = (text_width as f32 + square * 0.24, text_height as f32 + square * 0.08);
+                let pill_x = (center.x() - pill_width / 2.0).clamp(board.x(), board.x() + board.width() - pill_width);
+                let pill_y = (rect.y() - pill_height * 0.55).max(board.y());
+                let pill = graphene::Rect::new(pill_x, pill_y, pill_width, pill_height);
+                let rounded = gsk::RoundedRect::from_rect(pill, pill_height / 2.0);
+                snapshot.append_outset_shadow(
+                    &rounded,
+                    &gdk::RGBA::new(0.0, 0.0, 0.0, 0.3),
+                    0.0,
+                    pill_height * 0.08,
+                    0.0,
+                    pill_height * 0.3,
+                );
+                snapshot.push_rounded_clip(&rounded);
+                snapshot.append_color(&white, &pill);
+                snapshot.pop();
+                self.draw_text(
+                    snapshot,
+                    &label,
+                    pill_x + (pill_width - text_width as f32) / 2.0,
+                    pill_y + (pill_height - text_height as f32) / 2.0,
+                    ink,
+                );
+                snapshot.restore();
+            }
+            snapshot.pop();
+        }
+        let full = square * 0.38;
+        let diameter = full * draw.badge_scale() as f32;
+        if diameter > 0.5 {
+            for king in draw.kings() {
+                let rect = geometry.square_rect(king);
+                let center = (
+                    (rect.x() + rect.width() - full * 0.22).min(board.x() + board.width() - full / 2.0),
+                    (rect.y() + full * 0.22).max(board.y() + full / 2.0),
+                );
+                self.draw_badge_disc(snapshot, center, diameter, gdk::RGBA::new(0.36, 0.35, 0.34, 1.0));
+                let glyph = half(diameter * 0.62);
+                let (width, height) = glyph.pixel_size();
+                self.draw_text(snapshot, &glyph, center.0 - width as f32 / 2.0, center.1 - height as f32 / 2.0, white);
+            }
+        }
+    }
+
     fn draw_checkmate_overlay(&self, snapshot: &gtk::Snapshot, geometry: &BoardGeometry, state: &BoardState) {
         let Some(checkmate) = state.checkmate.as_ref() else { return };
         let white = gdk::RGBA::new(1.0, 1.0, 1.0, 1.0);
@@ -1080,13 +1190,21 @@ impl BoardWidget {
                     state.checkmate = None;
                 }
             }
-            imp.checkmate_frame.set(checkmate_active.then_some(now));
+            let mut draw_active = false;
+            if let Some(draw) = state.draw.as_mut()
+                && !draw.is_finished()
+            {
+                draw.update(elapsed_ms);
+                draw_active = !draw.is_finished();
+            }
+            imp.checkmate_frame.set((checkmate_active || draw_active).then_some(now));
             if state.accent_pulse.is_some_and(|pulse| pulse.is_finished(now)) {
                 state.accent_pulse = None;
             }
             let active = state.animation.is_some()
                 || state.select_pulse.is_some()
                 || checkmate_active
+                || draw_active
                 || state.accent_pulse.is_some();
             drop(state);
             widget.queue_draw();
@@ -1123,6 +1241,28 @@ impl BoardWidget {
         if started {
             self.ensure_ticking();
         }
+    }
+
+    pub fn set_draw(&self, drawn: bool) {
+        let started = {
+            let mut state = self.state.borrow_mut();
+            if !drawn {
+                state.draw = None;
+                false
+            } else if state.draw.is_some() {
+                false
+            } else {
+                let board = state.position.board();
+                let kings = board.king_of(Color::White).zip(board.king_of(Color::Black));
+                state.draw = kings.map(|(white, black)| DrawAnimation::new([white, black], DrawConfig::default()));
+                state.draw.is_some()
+            }
+        };
+        if started {
+            self.checkmate_frame.set(None);
+            self.ensure_ticking();
+        }
+        self.obj().queue_draw();
     }
 
     fn is_premove_piece(state: &BoardState, square: Square) -> bool {
